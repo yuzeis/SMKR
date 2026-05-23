@@ -1,0 +1,27 @@
+bind http cap_demo_http
+  method GET
+  path /rfn/cap-demo
+  func Function.HttpCapDemo
+  audit true
+end
+
+bind schedule cap_demo_tick
+  every_ms 60000
+  job_key cap_demo_tick
+  func Function.ScheduleCapDemo
+  audit true
+end
+
+bind schedule cap_demo_cron
+  cron */5 * * * *
+  job_key cap_demo_cron
+  func Function.ScheduleCapDemo
+  audit true
+end
+
+bind packet cap_demo_packet
+  direction s2c
+  target 0x0102
+  func Function.PacketCapDemo
+  audit true
+end

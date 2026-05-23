@@ -1,0 +1,6 @@
+bind http shop_get
+  method GET
+  path /rfn/shop
+  func Function.HttpGetShop
+  audit true
+end

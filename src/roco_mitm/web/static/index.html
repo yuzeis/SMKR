@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RKMS · Roco-Kingdom MITM Server</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0d10'/%3E%3Cpath d='M16 24h32M16 40h20' stroke='%2358d3a8' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/assets/app.css" />
+<script>
+  // 检测 Vue 加载失败 (无网络 / CDN 抽风) — 提示用户而不是死给一个白屏
+  window.__rkms_vue_failed = setTimeout(() => {
+    if (!window.Vue) {
+      const root = document.getElementById('app');
+      if (root) root.innerHTML = '<div style="color:#e57373;padding:32px;font-family:monospace">' +
+        '<h2>Vue 运行时未能加载</h2>' +
+        '<p>当前页面通过 CDN (unpkg.com) 加载 Vue 3。请检查网络后刷新, 或把 ' +
+        '<code>vue.global.prod.js</code> 放到 <code>src/roco_mitm/web/static/assets/</code> 目录, 改一下 index.html 的 script 路径即可离线运行。</p>' +
+        '</div>';
+    }
+  }, 4000);
+</script>
+<script src="/assets/vue.global.prod.js"></script>
+</head>
+<body class="theme-dark">
+<div id="app">
+  <div class="boot">
+    <div class="boot-stripes"></div>
+    <div class="boot-text">RKMS · 启动中</div>
+  </div>
+</div>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

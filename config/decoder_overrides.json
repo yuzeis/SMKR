@@ -1,0 +1,198 @@
+{
+  "_comment": "手工修订的 schema. opcodes 段把 wire 上的扁平化字段映射到对应 message; messages 段定义 message 的字段表. 用户可直接编辑本文件, 服务端会自动热重载.",
+  "_doc": "字段类型: int32/int64/uint32/uint64/sint32/sint64/bool/float/double/fixed32/fixed64/sfixed32/sfixed64/string/bytes/enum/message; 嵌套消息用 type:\"message\" + ref:\"消息名\"; repeated 字段加 \"repeated\": true",
+
+  "messages": {
+    "FriendRoleInfo": {
+      "fields": [
+        { "no": 1,  "name": "openid",                     "type": "string",  "desc": "账号标识" },
+        { "no": 2,  "name": "uin",                        "type": "uint32",  "desc": "用户ID" },
+        { "no": 3,  "name": "name",                       "type": "string",  "desc": "昵称" },
+        { "no": 4,  "name": "note",                       "type": "string",  "desc": "好友备注" },
+        { "no": 5,  "name": "head_img",                   "type": "string",  "desc": "头像URL" },
+        { "no": 6,  "name": "level",                      "type": "uint32",  "desc": "等级" },
+        { "no": 8,  "name": "online",                     "type": "bool",    "desc": "在线状态" },
+        { "no": 9,  "name": "gender",                     "type": "uint32",  "desc": "性别" },
+        { "no": 10, "name": "last_logout_time",           "type": "uint32",  "desc": "最后离线时间" },
+        { "no": 11, "name": "signature",                  "type": "string",  "desc": "个性签名" },
+        { "no": 12, "name": "world_level",                "type": "uint32",  "desc": "世界等级" },
+        { "no": 13, "name": "send_visit_apply_time",      "type": "uint32",  "desc": "拜访申请时间" },
+        { "no": 14, "name": "card_skin_selected",         "type": "uint32",  "desc": "名片皮肤" },
+        { "no": 15, "name": "regist_date",                "type": "uint32",  "desc": "注册时间" },
+        { "no": 16, "name": "source",                     "type": "uint32",  "desc": "来源" },
+        { "no": 17, "name": "card_icon_selected",         "type": "uint32",  "desc": "名片头像" },
+        { "no": 18, "name": "card_label_first_selected",  "type": "uint32",  "desc": "名片首标签" },
+        { "no": 19, "name": "card_label_last_selected",   "type": "uint32",  "desc": "名片尾标签" },
+        { "no": 20, "name": "card_handbook_collect_num",  "type": "uint32",  "desc": "图鉴收集数" },
+        { "no": 21, "name": "card_music_id",              "type": "uint32",  "desc": "名片音乐" },
+        { "no": 23, "name": "battle_brief_info",          "type": "message", "ref":  "PlayerBattleBriefInfo", "desc": "战斗简报" },
+        { "no": 24, "name": "home_info",                  "type": "message", "ref":  "FriendHomeInfo",       "desc": "家园信息" },
+        { "no": 25, "name": "add_friend_time",            "type": "uint32",  "desc": "加好友时间" },
+        { "no": 26, "name": "pinned_time",                "type": "uint32",  "desc": "置顶时间" },
+        { "no": 27, "name": "bp_gift_grade",              "type": "uint32",  "desc": "BP赠礼等级" },
+        { "no": 28, "name": "card_bussiness_card_url",    "type": "string",  "desc": "商务名片URL" },
+        { "no": 29, "name": "friend_type",                "type": "int32",   "desc": "好友类型" },
+        { "no": 30, "name": "plat_nick_name",             "type": "string",  "desc": "平台昵称" },
+        { "no": 31, "name": "start_up_privilege_info",    "type": "message", "ref":  "PlayerStartUpPrivilegeInfo", "desc": "启动特权" },
+        { "no": 32, "name": "cli_login_channel",          "type": "int32",   "desc": "登录渠道" },
+        { "no": 33, "name": "is_chat_node_unlock",        "type": "bool",    "desc": "聊天节点解锁" },
+        { "no": 34, "name": "unlocked_rel_node_num",      "type": "int32",   "desc": "已解锁关系节点" },
+        { "no": 35, "name": "pos_info",                   "type": "message", "ref":  "FriendPositionInfo",   "desc": "位置信息" },
+        { "no": 36, "name": "visit_info",                 "type": "message", "ref":  "FriendVisitInfo",      "desc": "访客信息" }
+      ]
+    },
+
+    "PlayerBattleBriefInfo": {
+      "fields": [
+        { "no": 1, "name": "battle_conf_id",        "type": "uint32", "desc": "战斗配置ID" },
+        { "no": 2, "name": "battle_state",          "type": "int32",  "desc": "战斗状态" },
+        { "no": 3, "name": "battlesvr_buspp_inst_id","type": "uint32", "desc": "战斗服实例ID" },
+        { "no": 4, "name": "bfd_id",                "type": "uint32", "desc": "战斗场景ID" }
+      ]
+    },
+
+    "FriendHomeInfo": {
+      "fields": [
+        { "no": 1,  "name": "home_name",          "type": "string",  "desc": "家园名称" },
+        { "no": 2,  "name": "home_experience",    "type": "uint32",  "desc": "家园经验" },
+        { "no": 3,  "name": "home_level",         "type": "uint32",  "desc": "家园等级" },
+        { "no": 4,  "name": "room_level",         "type": "uint32",  "desc": "房间等级" },
+        { "no": 5,  "name": "home_comfort_level", "type": "uint32",  "desc": "家园舒适度" },
+        { "no": 15, "name": "home_pet_can_steal", "type": "bool",    "desc": "宠物可被偷" },
+        { "no": 16, "name": "home_plant_can_pick","type": "bool",    "desc": "植物可采摘" },
+        { "no": 20, "name": "home_pets",          "type": "message", "ref": "HomePetBriefInfo", "repeated": true, "desc": "家园宠物列表" },
+        { "no": 40, "name": "craftable_furniture","type": "bytes",   "desc": "可合成家具" }
+      ]
+    },
+
+    "HomePetBriefInfo": { "fields": [] },
+
+    "FriendPositionInfo": {
+      "fields": [
+        { "no": 1, "name": "display_type",     "type": "uint32", "desc": "显示类型" },
+        { "no": 2, "name": "scene_res_cfg_id", "type": "int32",  "desc": "场景配置ID" },
+        { "no": 3, "name": "camp_id",          "type": "int32",  "desc": "阵营ID" }
+      ]
+    },
+
+    "FriendVisitInfo": {
+      "fields": [
+        { "no": 1, "name": "visitor_num", "type": "int32", "desc": "访客数量" }
+      ]
+    },
+
+    "PlayerStartUpPrivilegeInfo": {
+      "fields": [
+        { "no": 1, "name": "cli_startup_day",     "type": "int32", "desc": "启动天数" },
+        { "no": 2, "name": "cli_startup_channel", "type": "int32", "desc": "启动渠道" }
+      ]
+    },
+
+    "PlayerCardBriefInfo": {
+      "fields": [
+        { "no": 1,  "name": "card_icon_selected",          "type": "uint32",  "desc": "名片头像" },
+        { "no": 3,  "name": "card_label_first_selected",   "type": "uint32",  "desc": "名片首标签" },
+        { "no": 4,  "name": "card_label_last_selected",    "type": "uint32",  "desc": "名片尾标签" },
+        { "no": 5,  "name": "card_signature",              "type": "string",  "desc": "名片签名" },
+        { "no": 6,  "name": "card_handbook_collect_num",   "type": "uint32",  "desc": "图鉴收集数" },
+        { "no": 7,  "name": "card_favorite_pet_info",      "type": "message", "ref": "PlayerCardBriefInfo_FavoritePetInfo", "repeated": true, "desc": "收藏宠物" },
+        { "no": 8,  "name": "card_appearance_info",        "type": "message", "ref": "PlayerCardBriefInfo_AppearanceInfo", "desc": "外观信息" },
+        { "no": 9,  "name": "card_music_id",               "type": "uint32",  "desc": "名片音乐" },
+        { "no": 10, "name": "card_collect_info",           "type": "message", "ref": "PlayerCardBriefInfo_CollectInfo", "desc": "收藏信息" },
+        { "no": 11, "name": "business_card_info",          "type": "message", "ref": "PlayerBusinessCardInfo", "desc": "商务名片" },
+        { "no": 12, "name": "card_fashion_bond_collect_num","type": "uint32", "desc": "时装羁绊数" }
+      ]
+    },
+
+    "PlayerCardBriefInfo_FavoritePetInfo": {
+      "fields": [
+        { "no": 1, "name": "skill_dam_type",       "type": "uint32", "desc": "技能伤害类型" },
+        { "no": 2, "name": "pet_base_id",          "type": "uint32", "desc": "宠物基础ID" },
+        { "no": 3, "name": "last_shown_timestamp", "type": "uint32", "desc": "最后展示时间" },
+        { "no": 4, "name": "mutation_diff_type",   "type": "uint32", "desc": "变异类型" }
+      ]
+    },
+
+    "PlayerCardBriefInfo_CollectPetInfo": {
+      "fields": [
+        { "no": 1, "name": "skill_dam_type",     "type": "uint32", "desc": "技能伤害类型" },
+        { "no": 2, "name": "pet_base_id",        "type": "uint32", "desc": "宠物基础ID" },
+        { "no": 3, "name": "mutation_diff_type", "type": "uint32", "desc": "变异类型" },
+        { "no": 4, "name": "index",              "type": "uint32", "desc": "索引" }
+      ]
+    },
+
+    "PlayerCardBriefInfo_CollectFashionInfo": {
+      "fields": [
+        { "no": 1, "name": "fashion_bond_id", "type": "int32",  "desc": "时装羁绊ID" },
+        { "no": 2, "name": "index",           "type": "uint32", "desc": "索引" }
+      ]
+    },
+
+    "PlayerCardBriefInfo_CollectInfo": {
+      "fields": [
+        { "no": 1, "name": "card_module_pet_infos",     "type": "message", "ref": "PlayerCardBriefInfo_CollectPetInfo",     "repeated": true, "desc": "宠物模块" },
+        { "no": 2, "name": "card_module_fashion_infos", "type": "message", "ref": "PlayerCardBriefInfo_CollectFashionInfo", "repeated": true, "desc": "时装模块" }
+      ]
+    },
+
+    "PlayerCardBriefInfo_AppearanceInfo": {
+      "fields": [
+        { "no": 1, "name": "fashion_wear_id",     "type": "uint32", "repeated": true, "desc": "装扮ID" },
+        { "no": 2, "name": "pose_selected",       "type": "uint32", "desc": "姿势" },
+        { "no": 3, "name": "pose_frame_id",       "type": "uint32", "desc": "姿势框架ID" },
+        { "no": 4, "name": "card_skin_selected",  "type": "uint32", "desc": "名片皮肤" },
+        { "no": 5, "name": "salon_item_data",     "type": "bytes",  "repeated": true, "desc": "沙龙物品" }
+      ]
+    },
+
+    "PlayerBusinessCardInfo": {
+      "fields": [
+        { "no": 1, "name": "cur_card",            "type": "string", "desc": "当前名片" },
+        { "no": 2, "name": "cur_card_url",        "type": "string", "desc": "当前名片URL" },
+        { "no": 3, "name": "apply_change_time",   "type": "uint32", "desc": "申请变更时间" },
+        { "no": 4, "name": "last_card",           "type": "string", "desc": "上次名片" },
+        { "no": 5, "name": "last_card_url",       "type": "string", "desc": "上次名片URL" },
+        { "no": 6, "name": "apply_daily_changes", "type": "uint32", "desc": "每日变更次数" },
+        { "no": 7, "name": "photo_upload_time",   "type": "uint32", "desc": "照片上传时间" },
+        { "no": 8, "name": "photo_upload_counts", "type": "uint32", "desc": "照片上传次数" }
+      ]
+    }
+  },
+
+  "opcodes": {
+    "0x02A4": {
+      "name": "ZoneFriendSearchPlayerReq",
+      "direction": "c2s",
+      "category": "friend",
+      "desc": "搜索玩家请求 (取真实昵称 / FriendRoleInfo)",
+      "fields": [
+        { "no": 1, "name": "uin", "type": "uint32", "desc": "用户ID" }
+      ]
+    },
+    "0x02A5": {
+      "name": "ZoneFriendSearchPlayerRsp",
+      "direction": "s2c",
+      "category": "friend",
+      "desc": "搜索玩家响应 (服务端扁平化为 FriendRoleInfo)",
+      "decode_as": "FriendRoleInfo"
+    },
+    "0x03DC": {
+      "name": "ZoneGetPlayerCardBriefInfoReq",
+      "direction": "c2s",
+      "category": "friend",
+      "desc": "获取玩家名片简要信息请求",
+      "fields": [
+        { "no": 1, "name": "uin",    "type": "uint32",        "desc": "用户ID" },
+        { "no": 2, "name": "source", "type": "enum<GetSource>","desc": "来源 (1=friend, 2=scene)" }
+      ]
+    },
+    "0x03DD": {
+      "name": "ZoneGetPlayerCardBriefInfoRsp",
+      "direction": "s2c",
+      "category": "friend",
+      "desc": "玩家名片简要信息响应 (服务端扁平化为 PlayerCardBriefInfo)",
+      "decode_as": "PlayerCardBriefInfo"
+    }
+  }
+}

@@ -1,0 +1,73 @@
+.module roco.shop_query
+.version 0.1
+.target rfn-vm-0.1
+
+.function MatchShopRsp(decoded:obj, request:obj) -> bool
+.no_side_effect true
+.deterministic true
+  obj.get r0, arg0, "shop_data.id"
+  obj.get r1, arg1, "shop_id"
+  cmp.eq r2, r0, r1
+  ret r2
+.end
+
+.function HttpGetShop(req:http_req) -> http_rsp
+.no_side_effect false
+.deterministic false
+.capability "http.server" path="/rfn/shop"
+.capability "db.read" namespace="shop"
+.capability "db.write" namespace="shop"
+.capability "cache.write" scope="session" prefix="shop.qps"
+.capability "inject.query" targets="ZoneShopGetInfoReq,ZoneShopGetInfoRsp"
+  http.req_query r0, arg0, "shop_id"
+  cmp.exists r1, r0
+  jnz r1, have_id
+  map.from_pairs r2, "ok", false, "error_code", "E_ARG", "error", "missing shop_id"
+  http.resp_json r3, 400, r2
+  ret r3
+have_id:
+  cast.u32 r4, r0
+  jle r4, 0, bad_id
+  jgt r4, 1000000, bad_id
+  cache.incr r24, "session", "shop.qps", 1, 1000
+  jle r24, 10, qps_ok
+  map.from_pairs r25, "ok", false, "error_code", "E_RATE_LIMIT", "error", "too many /rfn/shop requests"
+  http.resp_json r26, 429, r25
+  ret r26
+qps_ok:
+  cast.str r5, r4
+  db.get r6, "shop", r5
+  cmp.exists r7, r6
+  jz r7, miss_db
+  map.from_pairs r8, "ok", true, "source", "db", "shop_id", r4, "shop_data", r6
+  http.resp_json r9, 200, r8
+  ret r9
+miss_db:
+  map.from_pairs r10, "shop_id", r4
+  str.cat r11, "shop:", r5
+  query.singleflight_where r12, r11, "ZoneShopGetInfoReq", r10, "ZoneShopGetInfoRsp", Function.MatchShopRsp, 2500
+  inject.ok r13, r12
+  jnz r13, got_rsp
+  obj.get r14, r12, "error_code"
+  obj.get r15, r12, "error"
+  map.from_pairs r16, "ok", false, "source", "query", "shop_id", r4, "error_code", r14, "error", r15
+  http.resp_json r27, 502, r16
+  ret r27
+bad_id:
+  map.from_pairs r28, "ok", false, "error_code", "E_ARG", "error", "shop_id out of range"
+  http.resp_json r29, 400, r28
+  ret r29
+got_rsp:
+  inject.decoded r17, r12
+  obj.get r18, r17, "shop_data"
+  cmp.exists r19, r18
+  jnz r19, save_rsp
+  map.from_pairs r20, "ok", false, "source", "query", "shop_id", r4, "error_code", "E_SCHEMA", "decoded", r17
+  http.resp_json r21, 502, r20
+  ret r21
+save_rsp:
+  db.put "shop", r5, r18, 60000
+  map.from_pairs r22, "ok", true, "source", "inject", "shop_id", r4, "shop_data", r18
+  http.resp_json r23, 200, r22
+  ret r23
+.end

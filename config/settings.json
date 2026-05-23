@@ -1,0 +1,31 @@
+{
+  "theme": "light",
+  "stream": {
+    "max_events": 5000,
+    "default_filter": "",
+    "hide_plaintext_short": true,
+    "hide_decrypt_failed": false,
+    "hide_no_schema": false,
+    "hide_unknown_fields": false,
+    "hide_common_noise": true,
+    "hidden_opcodes": "0x9001, 0x013D, 0x013F, 0x013E,0x0414"
+  },
+  "services": {
+    "http": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 18196,
+      "allow_remote": false,
+      "public_url": ""
+    },
+    "mcp": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 18210,
+      "auth_token": "",
+      "allow_inject": false,
+      "allow_rfn_exec": false,
+      "allow_rfn_import": false
+    }
+  }
+}

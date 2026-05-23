@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RFN 控制台 · RKMS</title>
+<style>
+  body { font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", monospace; background: #0b0d10; color: #d6dadd; margin: 0; padding: 16px; }
+  h1, h2 { color: #58d3a8; margin: 0 0 12px; }
+  h1 { font-size: 18px; }
+  h2 { font-size: 14px; margin-top: 18px; border-bottom: 1px solid #2a2f35; padding-bottom: 4px; }
+  pre { background: #14181d; padding: 10px; border-radius: 6px; max-height: 280px; overflow: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+  details { background: #14181d; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  details summary { cursor: pointer; color: #8ab4f8; font-size: 13px; }
+  button { background: #1f262d; color: #d6dadd; border: 1px solid #2f3942; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; margin: 0 4px 4px 0; }
+  button:hover { border-color: #58d3a8; color: #58d3a8; }
+  input, textarea { background: #14181d; color: #d6dadd; border: 1px solid #2f3942; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  textarea { width: 100%; min-height: 60px; box-sizing: border-box; }
+  textarea.source { min-height: 220px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; margin-bottom: 8px; }
+  .pill { background: #1f262d; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .pill.warn { color: #e57373; }
+  .pill.ok { color: #58d3a8; }
+  a { color: #8ab4f8; }
+</style>
+</head>
+<body>
+<h1>RFN Web 控制台 <span class="pill" id="status-pill">…</span> <a href="/" style="float:right">← 返回主界面</a></h1>
+<p style="color:#888; font-size:12px;">轻量状态与控制面板。复杂交互见主界面。</p>
+
+<div class="row">
+  <button onclick="refreshAll()">↻ 刷新全部</button>
+  <button onclick="reloadRfn()">⟳ 重新加载 RFN</button>
+  <span class="pill" id="last-refresh"></span>
+</div>
+
+<h2>RFN 状态</h2>
+<pre id="rfn-status">…</pre>
+
+<h2>函数</h2>
+<details open><summary id="fn-summary">…</summary><pre id="rfn-functions">…</pre></details>
+
+<h2>绑定</h2>
+<details open><summary id="bd-summary">…</summary><pre id="rfn-bindings">…</pre></details>
+
+<h2>定时任务</h2>
+<details open><summary id="job-summary">…</summary><pre id="rfn-jobs">…</pre></details>
+
+<h2>数据库命名空间</h2>
+<details><summary id="db-ns-summary">…</summary><pre id="rfn-db-ns">…</pre></details>
+
+<h2>缓存 / 缓冲区</h2>
+<details><summary>cache</summary><pre id="rfn-cache">…</pre></details>
+<details><summary>buffer</summary><pre id="rfn-buffer">…</pre></details>
+
+<h2>最近事件</h2>
+<details><summary id="ev-summary">…</summary><pre id="rfn-events">…</pre></details>
+
+<h2>手动执行</h2>
+<div class="row">
+  <input type="text" id="exec-name" placeholder="函数名，可省略 Function. 前缀" style="flex: 1; min-width: 240px;" />
+</div>
+<textarea id="exec-args" placeholder='参数 JSON 数组，例如 [] 或 [{"shop_id":8000}]'>[]</textarea>
+<div class="row"><button onclick="execFn()">▶ 执行</button></div>
+<pre id="exec-result"></pre>
+
+<h2>导入 / 执行 .rfn</h2>
+<div class="row">
+  <input type="text" id="import-name" placeholder="脚本名，例如 scratch" style="flex: 1; min-width: 180px;" />
+  <input type="text" id="import-function" placeholder="入口函数，默认 Main；裸脚本可留空" style="flex: 1; min-width: 240px;" />
+</div>
+<textarea id="import-args" placeholder="参数 JSON 数组">[]</textarea>
+<textarea class="source" id="import-source" spellcheck="false">.function Main() -> any
+.no_side_effect true
+.deterministic true
+  map.from_pairs r0, "ok", true, "source", "imported"
+  ret r0
+.end</textarea>
+<div class="row">
+  <button onclick="validateImport()">校验</button>
+  <button onclick="runImportSource()">临时运行</button>
+  <button onclick="saveAndRunImport()">导入并执行</button>
+</div>
+<details open><summary id="import-summary">…</summary><pre id="rfn-imports">…</pre></details>
+<pre id="import-result"></pre>
+
+<h2>RKS 预留</h2>
+<pre id="rks-status">…</pre>
+
+<script>
+async function getJson(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function postJson(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+
+function fmt(v) { return JSON.stringify(v, null, 2); }
+
+async function refreshAll() {
+  document.getElementById("last-refresh").textContent = "加载中…";
+  const status = await getJson("/api/rfn/status");
+  document.getElementById("rfn-status").textContent = fmt(status);
+  const pill = document.getElementById("status-pill");
+  pill.textContent = (status.loaded ? "已加载" : "未加载") + " / " + (status.enabled ? "已启用" : "已禁用");
+  pill.className = "pill " + (status.loaded && status.enabled ? "ok" : "warn");
+
+  const fns = (await getJson("/api/rfn/functions")).functions || [];
+  document.getElementById("fn-summary").textContent = fns.length + " 个函数";
+  document.getElementById("rfn-functions").textContent = fmt(fns);
+
+  const bds = (await getJson("/api/rfn/bindings")).bindings || {};
+  const total = Object.values(bds).reduce((a, b) => a + (Array.isArray(b) ? b.length : 0), 0);
+  document.getElementById("bd-summary").textContent = total + " 个绑定";
+  document.getElementById("rfn-bindings").textContent = fmt(bds);
+
+  const jobs = (await getJson("/api/rfn/jobs")).jobs || [];
+  document.getElementById("job-summary").textContent = jobs.length + " 个任务";
+  document.getElementById("rfn-jobs").textContent = fmt(jobs);
+
+  const ns = (await getJson("/api/rfn/db/namespaces")).namespaces || [];
+  document.getElementById("db-ns-summary").textContent = ns.length + " 个命名空间";
+  document.getElementById("rfn-db-ns").textContent = fmt(ns);
+
+  document.getElementById("rfn-cache").textContent = fmt((await getJson("/api/rfn/cache")).items || []);
+  document.getElementById("rfn-buffer").textContent = fmt((await getJson("/api/rfn/buffer")).items || []);
+
+  const events = (await getJson("/api/rfn/db/events?limit=30")).events || [];
+  document.getElementById("ev-summary").textContent = events.length + " 条最近事件";
+  document.getElementById("rfn-events").textContent = fmt(events);
+
+  const imports = (await getJson("/api/rfn/imports")).items || [];
+  document.getElementById("import-summary").textContent = imports.length + " 个导入脚本";
+  document.getElementById("rfn-imports").textContent = fmt(imports);
+
+  document.getElementById("rks-status").textContent = fmt(await getJson("/api/rks/status"));
+  document.getElementById("last-refresh").textContent = new Date().toLocaleTimeString();
+}
+
+async function reloadRfn() {
+  document.getElementById("rfn-status").textContent = "重新加载中…";
+  const r = await postJson("/api/rfn/reload", {});
+  document.getElementById("rfn-status").textContent = fmt(r);
+  setTimeout(refreshAll, 200);
+}
+
+async function execFn() {
+  const name = document.getElementById("exec-name").value.trim();
+  let args;
+  try { args = JSON.parse(document.getElementById("exec-args").value || "[]"); }
+  catch (e) { document.getElementById("exec-result").textContent = "参数 JSON 无效: " + e.message; return; }
+  document.getElementById("exec-result").textContent = "执行中…";
+  const r = await postJson("/api/rfn/exec", { function: name, args });
+  document.getElementById("exec-result").textContent = fmt(r);
+}
+
+function importPayload() {
+  let args;
+  try { args = JSON.parse(document.getElementById("import-args").value || "[]"); }
+  catch (e) { throw new Error("参数 JSON 无效: " + e.message); }
+  if (!Array.isArray(args)) throw new Error("参数必须是 JSON 数组");
+  return {
+    name: document.getElementById("import-name").value.trim() || "scratch",
+    function: document.getElementById("import-function").value.trim(),
+    args,
+    source: document.getElementById("import-source").value,
+  };
+}
+
+async function validateImport() {
+  try {
+    const p = importPayload();
+    document.getElementById("import-result").textContent = "校验中…";
+    document.getElementById("import-result").textContent = fmt(await postJson("/api/rfn/imports/validate", p));
+  } catch (e) {
+    document.getElementById("import-result").textContent = e.message;
+  }
+}
+
+async function runImportSource() {
+  try {
+    const p = importPayload();
+    document.getElementById("import-result").textContent = "执行中…";
+    document.getElementById("import-result").textContent = fmt(await postJson("/api/rfn/imports/run", p));
+    setTimeout(refreshAll, 200);
+  } catch (e) {
+    document.getElementById("import-result").textContent = e.message;
+  }
+}
+
+async function saveAndRunImport() {
+  try {
+    const p = importPayload();
+    document.getElementById("import-result").textContent = "导入中…";
+    const saved = await postJson("/api/rfn/imports", p);
+    if (!saved.ok) {
+      document.getElementById("import-result").textContent = fmt(saved);
+      return;
+    }
+    const run = await postJson("/api/rfn/imports/" + encodeURIComponent(saved.name) + "/run", p);
+    document.getElementById("import-result").textContent = fmt({ ok: Boolean(run.ok), imported: saved, run });
+    setTimeout(refreshAll, 200);
+  } catch (e) {
+    document.getElementById("import-result").textContent = e.message;
+  }
+}
+
+refreshAll();
+</script>
+</body>
+</html>

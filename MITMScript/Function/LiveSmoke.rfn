@@ -1,0 +1,40 @@
+.module roco.live_smoke
+.version 0.1
+.target rfn-vm-0.1
+
+.function LiveLoginSmoke(pkt:obj) -> obj
+.no_side_effect false
+.deterministic false
+.capability "db.write" namespace="rfn_live"
+.capability "file.write" path="rfn_live_smoke.txt"
+  packet.opcode_hex r0, arg0
+  obj.get r1, arg0, "decoded.player_info.brief_info.uin"
+  obj.get r2, arg0, "decoded.player_info.brief_info.role_level"
+  obj.get r3, arg0, "wire.sequence"
+  obj.get r4, arg0, "payload_len"
+  map.from_pairs r5, "opcode", r0, "uin", r1, "role_level", r2, "gcp_seq", r3, "payload_len", r4
+  db.put "rfn_live", "last_login_rsp", r5, 0
+  file.write_text "rfn_live_smoke.txt", "RFN_LIVE_LOGIN_TRIGGERED", "utf-8", true
+  ret r5
+.end
+
+.function LiveStatus(req:http_req) -> http_rsp
+.no_side_effect false
+.deterministic false
+.capability "http.server" path="/rfn/live-status"
+.capability "db.read" namespace="rfn_live"
+  db.get r0, "rfn_live", "last_login_rsp"
+  map.from_pairs r1, "ok", true, "last_login_rsp", r0
+  http.resp_json r2, 200, r1
+  ret r2
+.end
+
+.function LiveReconnect(req:http_req) -> http_rsp
+.no_side_effect false
+.deterministic false
+.capability "http.server" path="/rfn/reconnect"
+.capability "session.control"
+  session.disconnect r0, "rfn.reconnect"
+  http.resp_json r1, 200, r0
+  ret r1
+.end

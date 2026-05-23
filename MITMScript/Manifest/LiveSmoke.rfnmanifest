@@ -1,0 +1,20 @@
+bind packet live_login_rsp
+  direction s2c
+  target 0x0102
+  func Function.LiveLoginSmoke
+  audit true
+end
+
+bind http live_status
+  method GET
+  path /rfn/live-status
+  func Function.LiveStatus
+  audit true
+end
+
+bind http live_reconnect
+  method POST
+  path /rfn/reconnect
+  func Function.LiveReconnect
+  audit true
+end

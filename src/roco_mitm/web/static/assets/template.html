@@ -1,0 +1,677 @@
+<div class="app-shell">
+
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">R</div>
+      <div class="brand-copy">
+        RKMS<span class="ver"> · 2.1 Verzweifelt</span><span class="author">花吹雪又一年</span>
+      </div>
+    </div>
+
+    <span class="status-pill" :class="{ connected: status.connected, disconnected: !status.connected }">
+      <span class="dot"></span>
+      <span class="label">Game</span>
+      <span class="val">{{ status.connected ? (status.upstream || '已连接') : '等待连接' }}</span>
+    </span>
+
+    <span class="status-pill" :class="{ ready: status.ready_for_inject }" v-if="status.session_key_hex">
+      <span class="dot"></span>
+      <span class="label">Key</span>
+      <span class="val">{{ status.session_key_ascii || (status.session_key_hex.slice(0, 8) + '…') }}</span>
+    </span>
+
+    <span class="status-pill" v-if="status.session_id_hex">
+      <span class="label">SID</span>
+      <span class="val">{{ status.session_id_hex }}</span>
+    </span>
+
+    <span class="status-pill" v-if="status.connected">
+      <span class="label">Seq</span>
+      <span class="val">{{ status.last_gcp_seq }}</span>
+      <span class="label" style="margin-left: 6px;">Off</span>
+      <span class="val" :style="{ color: status.c2s_seq_offset > 0 ? 'var(--inject)' : undefined }">
+        {{ status.c2s_seq_offset > 0 ? '+' + status.c2s_seq_offset : status.c2s_seq_offset }}
+      </span>
+    </span>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="topbar-actions">
+      <span class="status-pill" :class="{ connected: status.ws_connected, disconnected: !status.ws_connected }">
+        <span class="dot"></span>
+        <span class="label">WS</span>
+      </span>
+      <button class="btn btn-ghost" @click="openRfnPanel" title="RFN 控制台">▤ RFN</button>
+      <button class="btn btn-ghost" @click="reloadSchemas" title="重新加载 opcodes.json">↻ Schema</button>
+      <button class="btn btn-ghost" @click="showSettingsModal = true" title="设置">⚙ 设置</button>
+    </div>
+  </header>
+
+  <main class="split">
+
+    <section class="pane">
+      <div class="pane-head">
+        <div class="pane-title">RX · 实时收包</div>
+        <div class="pane-meta">
+          <span><b>{{ stream.items.value.length }}</b> 缓冲</span>
+          <span v-if="visibleStream.length !== stream.items.value.length"><b>{{ visibleStream.length }}</b> 命中</span>
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn btn-ghost" @click="togglePause">
+          {{ paused ? '▶ 继续' : '⏸ 暂停' }}
+        </button>
+        <button class="btn btn-ghost" @click="clearStream">⌫ 清空</button>
+      </div>
+
+      <div class="filter-bar">
+        <input
+          type="text"
+          v-model="filterText"
+          placeholder='过滤: dir=s2c  opcode=0x03DD  cat=friend  name~Friend  has_error  &amp; / |' />
+        <span class="hint" v-if="filterErr" style="color: var(--error);">{{ filterErr }}</span>
+        <span class="hint" v-else-if="filterText">{{ visibleStream.length }} / {{ stream.items.value.length }}</span>
+      </div>
+
+      <div class="pane-body" v-if="stream.items.value.length === 0">
+        <div class="empty-state">
+          <div class="big">等待数据流</div>
+          <div>启动 <code>divert --run</code> 并打开游戏后将看到实时包</div>
+        </div>
+      </div>
+      <ul class="stream pane-body" ref="streamListRef" v-else>
+        <li
+          v-for="ev in renderedStream"
+          :key="ev.seq"
+          class="pkt"
+          :class="{
+            'dir-c2s': ev.direction === 'c2s' && ev.kind !== 'inject',
+            'dir-s2c': ev.direction === 's2c',
+            'is-inject': ev.kind === 'inject',
+            'expanded': stream.expanded.value.has(ev.seq),
+          }"
+          @click="togglePacketExpand(ev)">
+          <div class="pkt-head">
+            <span class="pkt-time">{{ stream.fmtTime(ev.ts) }}</span>
+            <span class="pkt-arrow" :class="ev.direction">
+              {{ ev.direction === 'c2s' ? '↑' : '↓' }}
+            </span>
+            <span class="pkt-opcode" :class="ev.direction" v-if="ev.opcode_hex">{{ ev.opcode_hex }}</span>
+            <span class="pkt-opcode mono" style="color:var(--text-3)" v-else>{{ ev.wire?.command_name }}</span>
+            <span class="pkt-name" v-if="ev.opcode_meta?.name">
+              {{ ev.opcode_meta.name }}
+            </span>
+            <span class="pkt-name muted" v-else-if="ev.kind === 'data' && !ev.opcode_meta">
+              (无 schema)
+            </span>
+            <span class="pkt-tag heartbeat" v-if="ev.wire?.command === 0x9001">heartbeat</span>
+            <span class="pkt-tag ack" v-if="ev.kind === 'ack'">ACK</span>
+            <span class="pkt-tag inject" v-if="ev.kind === 'inject'">inject</span>
+            <span class="pkt-tag heartbeat" v-if="ev.decode_status === 'queued'">decode</span>
+            <span class="pkt-tag err" v-if="ev.kind === 'data_decrypt_failed'">decrypt-err</span>
+            <span class="pkt-meta">
+              seq=<b>{{ ev.wire?.sequence }}</b><span v-if="ev.payload_len"> · {{ ev.payload_len }}B</span>
+            </span>
+          </div>
+
+          <div class="pkt-body" v-if="stream.expanded.value.has(ev.seq)" @click.stop>
+            <div class="kv">
+              <span class="k">wire</span>
+              <span class="v mono">{{ ev.wire?.command_hex }} ({{ ev.wire?.command_name }}) · {{ ev.wire?.total_length }}B · seq={{ ev.wire?.sequence }}</span>
+              <template v-if="ev.internal">
+                <span class="k">internal</span>
+                <span class="v mono">c1={{ ev.internal.counter1 }} c2=0x{{ ev.internal.counter2.toString(16).padStart(8,'0') }} sid={{ ev.internal.session_id_hex }} sub={{ ev.internal.sub_id_hex }}</span>
+              </template>
+              <template v-if="ev.opcode_meta?.desc">
+                <span class="k">desc</span>
+                <span class="v">{{ ev.opcode_meta.desc }}</span>
+              </template>
+              <template v-if="ev.payload_hex">
+                <span class="k">payload</span>
+                <span class="v mono">{{ ev.payload_hex }}</span>
+              </template>
+              <template v-if="ev.error">
+                <span class="k">error</span>
+                <span class="v" style="color:var(--error)">{{ ev.error }}</span>
+              </template>
+              <template v-if="ev.decode_status">
+                <span class="k">decode</span>
+                <span class="v" :style="{ color: ev.decode_status === 'error' ? 'var(--error)' : undefined }">
+                  {{ ev.decode_status }}<span v-if="ev.decode_error"> · {{ ev.decode_error }}</span>
+                </span>
+              </template>
+            </div>
+
+            <div v-if="ev.decoded">
+              <ul class="tree" style="margin-top:8px;">
+                <template v-for="(v, k) in ev.decoded" :key="k">
+                  <field-node v-if="k !== '_unknown'" :name="k" :value="v"></field-node>
+                  <li v-else class="unknown-tag">
+                    未知字段 × {{ v.length }}
+                    <ul class="unknown-list">
+                      <li v-for="(u, i) in v" :key="i">
+                        #{{ u.no }} wt={{ u.wire }}<span v-if="u.reason"> · {{ u.reason }}</span>
+                        <span class="mono" v-if="u.value !== undefined"> · {{ typeof u.value === 'string' ? u.value : JSON.stringify(u.value) }}</span>
+                      </li>
+                    </ul>
+                  </li>
+                </template>
+              </ul>
+            </div>
+            <div v-else-if="ev.decode_status === 'no_schema'" class="no-schema-tag" style="margin-top:6px;">
+              此 opcode 尚未在 config 中定义 schema · 仅展示 hex
+            </div>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head">
+        <div class="pane-title">TX · 注入发送</div>
+        <div class="pane-meta">
+          <span v-if="status.ready_for_inject">就绪</span>
+          <span v-else style="color:var(--text-4)">未就绪 (无 baseline)</span>
+        </div>
+      </div>
+
+      <div class="pane-body tx">
+
+        <div class="section">
+          <div class="section-head">
+            <span class="section-title">Opcode 选择</span>
+            <span class="pane-meta"><b>{{ status.registry_stats.opcodes }}</b> 条目 · <b>{{ status.registry_stats.messages }}</b> message</span>
+          </div>
+          <div class="section-body">
+            <opcode-picker
+              :opcodes="opcodes"
+              :selected="selectedOp"
+              @select="selectOpcode"></opcode-picker>
+            <div v-if="selectedOp" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+              <span class="cat-tag" :class="selectedOp.category">{{ selectedOp.category || '-' }}</span>
+              <span class="dir-tag" :class="selectedOp.direction">{{ selectedOp.direction || '-' }}</span>
+              <span class="mono" style="color:var(--text-3); font-size:11.5px;">
+                {{ selectedOp.hex }} · {{ selectedOp.name }}
+              </span>
+            </div>
+            <div v-if="selectedOp?.desc" style="color:var(--text-3); margin-top:6px; font-size:11.5px;">
+              {{ selectedOp.desc }}
+            </div>
+          </div>
+        </div>
+
+        <div class="section" v-if="selectedOp">
+          <div class="section-head">
+            <span class="section-title">参数编辑</span>
+            <div class="mode-tabs">
+              <button :class="{ active: editMode === 'form' }" @click="editMode = 'form'" :disabled="!selectedSchema">Form</button>
+              <button :class="{ active: editMode === 'json' }" @click="editMode = 'json'" :disabled="!selectedSchema">JSON</button>
+              <button :class="{ active: editMode === 'hex' }" @click="editMode = 'hex'">Hex</button>
+            </div>
+          </div>
+          <div class="section-body">
+            <template v-if="editMode === 'form'">
+              <div v-if="!selectedSchema || selectedSchema.length === 0" class="empty-state" style="padding:14px; height:auto;">
+                此 opcode 无字段定义 · 切到 Hex 模式直接编辑 payload
+              </div>
+              <template v-else>
+                <div v-for="f in selectedSchema" :key="f.no" class="field-row" :class="{ message: (f.type||'').startsWith('message') }">
+                  <div class="label">
+                    <span><b>{{ f.name }}</b><span class="desc" v-if="f.desc">— {{ f.desc }}</span></span>
+                    <span class="meta">#{{ f.no }} · {{ f.type }}{{ f.repeated ? ' (repeated)' : '' }}</span>
+                  </div>
+                  <div class="control">
+                    <field-input :field="f" v-model="formValue[f.name]"></field-input>
+                  </div>
+                </div>
+              </template>
+            </template>
+
+            <textarea
+              v-if="editMode === 'json'"
+              v-model="jsonValue"
+              :placeholder="'{ &quot;uin&quot;: 1852750 }'"
+              style="width:100%; min-height:140px;" spellcheck="false"></textarea>
+
+            <textarea
+              v-if="editMode === 'hex'"
+              v-model="hexValue"
+              placeholder="payload hex (空格 / 换行任意)"
+              style="width:100%; min-height:120px;" spellcheck="false"></textarea>
+
+            <div style="margin-top: 12px;">
+              <div class="preview-box" v-if="previewError" style="border-color: var(--error); color: var(--error);">
+                <div class="meta">编码错误</div>
+                {{ previewError }}
+              </div>
+              <div class="preview-box" v-else>
+                <div class="meta">PAYLOAD · {{ previewLen }} 字节</div>
+                {{ previewHex || '(空)' }}
+              </div>
+            </div>
+
+            <div class="tx-actions" style="margin-top: 12px;">
+              <button class="btn-primary btn"
+                      @click="send"
+                      :disabled="!status.ready_for_inject || !!previewError">
+                📨 发送
+              </button>
+              <button class="btn" @click="showSaveModal = true" :disabled="!previewHex">💾 保存为模板</button>
+              <span style="flex:1"></span>
+              <span style="color:var(--text-4); font-size:11px;" v-if="!status.ready_for_inject">需先抓到 session_key</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <span class="section-title">已保存的模板</span>
+            <span class="pane-meta"><b>{{ templates.length }}</b></span>
+          </div>
+          <div class="section-body dense" style="padding: 0;">
+            <ul class="template-list">
+              <li v-for="t in templates" :key="t.name">
+                <span class="opcode mono">{{ t.opcode_hex }}</span>
+                <span class="name">{{ t.name }}</span>
+                <span class="actions">
+                  <button class="btn btn-ghost" @click="loadTemplate(t)">载入</button>
+                  <button class="btn btn-ghost btn-danger" @click="deleteTemplate(t)">×</button>
+                </span>
+              </li>
+              <li v-if="templates.length === 0" class="empty">还没有模板 · 编辑后点击 "保存为模板"</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="section inject-reply-section">
+          <div class="section-head">
+            <span class="section-title">本次注入回复</span>
+            <span class="pane-meta" v-if="lastInject">
+              {{ lastInject.opcode_hex }} → {{ lastInject.reply_opcode_hex || '-' }}
+            </span>
+          </div>
+          <div class="section-body dense">
+            <div v-if="!lastInject" class="empty-state reply-empty">
+              还没有注入包
+            </div>
+            <div v-else-if="!injectReply" class="reply-wait">
+              <span class="mono">{{ lastInject.opcode_hex }}</span>
+              已注入，等待
+              <span class="mono">{{ lastInject.reply_opcode_hex }}</span>
+              回复
+            </div>
+            <div v-else class="reply-card">
+              <div class="reply-head">
+                <span class="pkt-opcode s2c">{{ injectReply.opcode_hex }}</span>
+                <span class="pkt-name" v-if="injectReply.opcode_meta?.name">{{ injectReply.opcode_meta.name }}</span>
+                <span class="pkt-meta">seq=<b>{{ injectReply.wire?.sequence }}</b><span v-if="injectReply.payload_len"> · {{ injectReply.payload_len }}B</span></span>
+              </div>
+              <div class="reply-kv">
+                <span class="k">wire</span>
+                <span class="v mono">{{ injectReply.wire?.command_hex }} · {{ injectReply.wire?.total_length }}B</span>
+                <template v-if="injectReply.payload_hex">
+                  <span class="k">payload</span>
+                  <span class="v mono">{{ injectReply.payload_hex }}</span>
+                </template>
+                <template v-if="injectReply.decode_error">
+                  <span class="k">decode</span>
+                  <span class="v" style="color:var(--error)">{{ injectReply.decode_error }}</span>
+                </template>
+                <template v-else-if="injectReply.decode_status">
+                  <span class="k">decode</span>
+                  <span class="v">{{ injectReply.decode_status }}</span>
+                </template>
+              </div>
+              <ul class="tree" v-if="injectReply.decoded" style="margin-top:8px;">
+                <template v-for="(v, k) in injectReply.decoded" :key="k">
+                  <field-node v-if="k !== '_unknown'" :name="k" :value="v"></field-node>
+                  <li v-else class="unknown-tag">
+                    未知字段 × {{ v.length }}
+                    <ul class="unknown-list">
+                      <li v-for="(u, i) in v" :key="i">
+                        #{{ u.no }} wt={{ u.wire }}<span v-if="u.reason"> · {{ u.reason }}</span>
+                        <span class="mono" v-if="u.value !== undefined"> · {{ typeof u.value === 'string' ? u.value : JSON.stringify(u.value) }}</span>
+                      </li>
+                    </ul>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="statusbar">
+    <span class="stat c2s"><span>C2S</span><span class="v">{{ status.c2s_count }}</span></span>
+    <span class="stat s2c"><span>S2C</span><span class="v">{{ status.s2c_count }}</span></span>
+    <span class="stat inj"><span>Inject</span><span class="v">{{ status.c2s_seq_offset }}</span></span>
+
+    <div class="spark" :title="'最近 60s C2S/S2C 包计数'">
+      <svg viewBox="0 0 240 24" preserveAspectRatio="none">
+        <g v-for="(b, i) in trafficWindow" :key="i"
+           :transform="'translate(' + (i * (240 / 60)) + ',0)'">
+          <rect class="bar-c2s" :y="12 - Math.min(11, b.c2s)" :width="240/60 - 0.5" :height="Math.min(12, b.c2s)" />
+          <rect class="bar-s2c" :y="12" :width="240/60 - 0.5" :height="Math.min(12, b.s2c)" />
+        </g>
+        <line x1="0" y1="12" x2="240" y2="12" stroke="var(--border)" stroke-width="0.5" />
+      </svg>
+    </div>
+
+    <span style="flex:1"></span>
+    <div class="perf-panel" title="1s window performance counters">
+      <span><b>CPU</b> {{ fmtPct(perf.process_cpu_pct) }}</span>
+      <span><b>Q</b> {{ perf.queue?.outbound_depth || 0 }}/{{ perf.queue?.outbound_max || 0 }}</span>
+      <span><b>RW C/S</b> {{ fmtMs('c2s_read_write') }}/{{ fmtMs('s2c_read_write') }}ms</span>
+      <span><b>DR C/S</b> {{ fmtMs('c2s_write_drain') }}/{{ fmtMs('s2c_write_drain') }}ms</span>
+      <span><b>MX C/S</b> {{ fmtMs('c2s_read_write', 'max_ms') }}/{{ fmtMs('s2c_read_write', 'max_ms') }}ms</span>
+      <span><b>CRYPT D/E</b> {{ fmtMbps('decrypt') }}/{{ fmtMbps('encrypt') }}MB/s</span>
+      <span><b>INJ</b> {{ fmtMs('inject_build') }}ms</span>
+      <span><b>UP</b> {{ fmtMs('upstream_resolve', 'max_ms') }}ms</span>
+    </div>
+    <span class="stat" v-if="settings.services.http.enabled"><span>HTTP</span><span class="v">{{ settings.services.http.host }}:{{ settings.services.http.port }}</span></span>
+    <span class="stat" v-if="settings.services.mcp.enabled"><span>MCP</span><span class="v">{{ settings.services.mcp.host }}:{{ settings.services.mcp.port }}</span></span>
+    <span class="stat"><span>buffer</span><span class="v">{{ stream.items.value.length }}</span></span>
+  </footer>
+
+  <div class="toast-stack">
+    <div v-for="t in toasts.list.value" :key="t.id" class="toast" :class="t.kind">
+      <div class="title">{{ t.title }}</div>
+      <div class="body" v-if="t.body">{{ t.body }}</div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" v-if="showRfnPanel" @click.self="showRfnPanel = false">
+    <div class="modal modal-wide rfn-console-modal">
+      <div class="modal-head with-actions">
+        <span>RFN 控制台</span>
+        <div class="modal-actions">
+          <a class="btn btn-ghost" href="/rfn-console" target="_blank" rel="noopener">独立页</a>
+          <button class="btn btn-ghost" @click="loadRfnConsole" :disabled="rfnConsole.loading">
+            {{ rfnConsole.loading ? '刷新中...' : '刷新' }}
+          </button>
+          <button class="btn btn-ghost" @click="reloadRfnFromPanel" :disabled="rfnConsole.actionBusy === 'reload'">重新加载</button>
+          <button class="btn btn-ghost btn-icon" @click="showRfnPanel = false">×</button>
+        </div>
+      </div>
+      <div class="modal-body rfn-console-body">
+        <div class="settings-error" v-if="rfnConsole.error">{{ rfnConsole.error }}</div>
+
+        <div class="rfn-summary">
+          <span class="status-pill" :class="{ connected: rfnConsole.status?.loaded, disconnected: !rfnConsole.status?.loaded }">
+            <span class="dot"></span>
+            <span class="label">RFN</span>
+            <span class="val">{{ rfnConsole.status?.loaded ? '已加载' : '离线' }}</span>
+          </span>
+          <span class="stat"><span>函数</span><span class="v">{{ rfnConsole.functions.length }}</span></span>
+          <span class="stat"><span>绑定</span><span class="v">{{ (rfnConsole.bindings.packet || []).length + (rfnConsole.bindings.http || []).length + (rfnConsole.bindings.schedule || []).length }}</span></span>
+          <span class="stat"><span>任务</span><span class="v">{{ rfnConsole.jobs.length }}</span></span>
+          <span class="stat"><span>RKS</span><span class="v">{{ rfnConsole.rksStatus?.status || '-' }}</span></span>
+        </div>
+
+        <div class="rfn-console-grid">
+          <section class="rfn-section">
+            <h3>手动执行</h3>
+            <label class="setting-row">
+              <span>函数</span>
+              <input v-model="rfnConsole.execName" list="rfn-function-names" />
+            </label>
+            <datalist id="rfn-function-names">
+              <option v-for="fn in rfnConsole.functions" :key="fn.name" :value="fn.name"></option>
+            </datalist>
+            <label class="setting-row setting-row-stack">
+              <span>参数 JSON</span>
+              <textarea v-model="rfnConsole.execArgs"></textarea>
+            </label>
+            <button class="btn btn-primary" @click="execRfnFromPanel" :disabled="rfnConsole.actionBusy === 'exec'">执行</button>
+            <pre class="rfn-json" v-if="rfnConsole.execResult">{{ asJson(rfnConsole.execResult) }}</pre>
+          </section>
+
+          <section class="rfn-section rfn-section-wide">
+            <h3>导入 / 执行 .rfn</h3>
+            <div class="rfn-import-grid">
+              <label class="setting-row">
+                <span>脚本名</span>
+                <input v-model="rfnConsole.importName" placeholder="scratch" />
+              </label>
+              <label class="setting-row">
+                <span>入口函数</span>
+                <input v-model="rfnConsole.importFunction" placeholder="Main；裸脚本可留空" />
+              </label>
+              <label class="setting-row setting-row-stack">
+                <span>参数 JSON</span>
+                <textarea v-model="rfnConsole.importArgs"></textarea>
+              </label>
+              <label class="setting-row setting-row-stack rfn-import-source">
+                <span>RFN 源码</span>
+                <textarea v-model="rfnConsole.importSource"></textarea>
+              </label>
+            </div>
+            <div class="rfn-inline-actions">
+              <button class="btn btn-ghost" @click="validateRfnImport" :disabled="rfnConsole.actionBusy === 'import'">校验</button>
+              <button class="btn btn-ghost" @click="runRfnImportSource" :disabled="rfnConsole.actionBusy === 'import'">临时运行</button>
+              <button class="btn btn-primary" @click="importAndRunRfnSource" :disabled="rfnConsole.actionBusy === 'import'">导入并执行</button>
+            </div>
+            <div class="rfn-import-list" v-if="rfnConsole.imports.length">
+              <div class="rfn-import-row" v-for="item in rfnConsole.imports" :key="item.name">
+                <div class="rfn-job-main">
+                  <span class="mono">{{ item.name }}</span>
+                  <small>{{ item.size }} bytes · {{ item.validation?.ok ? '校验通过' : '校验失败' }}</small>
+                </div>
+                <div class="rfn-job-actions">
+                  <button class="btn btn-ghost" @click="runImportedRfn(item.name)" :disabled="rfnConsole.actionBusy === ('import:' + item.name)">执行</button>
+                  <button class="btn btn-ghost" @click="deleteImportedRfn(item.name)" :disabled="rfnConsole.actionBusy === ('import:' + item.name)">删除</button>
+                </div>
+              </div>
+            </div>
+            <div class="empty-inline" v-else>无已导入脚本</div>
+            <pre class="rfn-json" v-if="rfnConsole.importResult">{{ asJson(rfnConsole.importResult) }}</pre>
+          </section>
+
+          <section class="rfn-section">
+            <h3>定时任务</h3>
+            <div class="rfn-job-list" v-if="rfnConsole.jobs.length">
+              <div class="rfn-job-row" v-for="job in rfnConsole.jobs" :key="job.job_key">
+                <div class="rfn-job-main">
+                  <span class="mono">{{ job.job_key }}</span>
+                  <small>{{ job.kind }} · {{ job.enabled ? '已启用' : '已禁用' }} · {{ job.in_memory ? '内存' : 'SQLite' }}</small>
+                </div>
+                <div class="rfn-job-actions">
+                  <button class="btn btn-ghost" @click="runRfnJob(job.job_key)" :disabled="rfnConsole.actionBusy === job.job_key">执行</button>
+                  <button class="btn btn-ghost" v-if="job.enabled" @click="setRfnJobEnabled(job.job_key, false)" :disabled="rfnConsole.actionBusy === job.job_key">禁用</button>
+                  <button class="btn btn-ghost" v-else @click="setRfnJobEnabled(job.job_key, true)" :disabled="rfnConsole.actionBusy === job.job_key">启用</button>
+                  <button class="btn btn-ghost" @click="cancelRfnJob(job.job_key)" :disabled="rfnConsole.actionBusy === job.job_key">删除 Job</button>
+                </div>
+              </div>
+            </div>
+            <div class="empty-inline" v-else>无 job</div>
+            <pre class="rfn-json" v-if="rfnConsole.jobResult">{{ asJson(rfnConsole.jobResult) }}</pre>
+          </section>
+
+          <section class="rfn-section">
+            <h3>函数</h3>
+            <div class="rfn-chip-list">
+              <button class="rfn-chip" v-for="fn in rfnConsole.functions" :key="fn.name" @click="rfnConsole.execName = fn.name">
+                {{ fn.name }}<small>{{ fn.arity }}</small>
+              </button>
+            </div>
+          </section>
+
+          <section class="rfn-section">
+            <h3>绑定</h3>
+            <pre class="rfn-json">{{ asJson(rfnConsole.bindings) }}</pre>
+          </section>
+
+          <section class="rfn-section">
+            <h3>数据库</h3>
+            <pre class="rfn-json">{{ asJson(rfnConsole.namespaces) }}</pre>
+          </section>
+
+          <section class="rfn-section">
+            <h3>缓存 / 缓冲区</h3>
+            <div class="rfn-two-col">
+              <pre class="rfn-json">{{ asJson(rfnConsole.cache) }}</pre>
+              <pre class="rfn-json">{{ asJson(rfnConsole.buffer) }}</pre>
+            </div>
+          </section>
+
+          <section class="rfn-section rfn-section-wide">
+            <h3>最近事件</h3>
+            <pre class="rfn-json">{{ asJson(rfnConsole.events) }}</pre>
+          </section>
+
+          <section class="rfn-section rfn-section-wide">
+            <h3>状态 / RKS 预留</h3>
+            <div class="rfn-two-col">
+              <pre class="rfn-json">{{ asJson(rfnConsole.status) }}</pre>
+              <pre class="rfn-json">{{ asJson(rfnConsole.rksStatus) }}</pre>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" v-if="showSettingsModal" @click.self="showSettingsModal = false">
+    <div class="modal modal-wide settings-modal">
+      <div class="modal-head with-actions">
+        <span>设置</span>
+        <button class="btn btn-ghost btn-icon" @click="showSettingsModal = false">×</button>
+      </div>
+      <div class="modal-body settings-body">
+        <div class="settings-error" v-if="settingsError">{{ settingsError }}</div>
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>界面与缓存</h3>
+            <label class="setting-row">
+              <span>主题</span>
+              <select v-model="settings.theme">
+                <option value="dark">深色</option>
+                <option value="light">浅色</option>
+                <option value="system">跟随系统</option>
+              </select>
+            </label>
+            <label class="setting-row">
+              <span>最大缓存包数</span>
+              <input type="number" min="100" max="100000" step="100" v-model.number="settings.stream.max_events" />
+            </label>
+            <label class="setting-row">
+              <span>默认过滤表达式</span>
+              <input v-model="settings.stream.default_filter" placeholder="dir=s2c  opcode=0x4013  has_error" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>流量屏蔽</h3>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.stream.hide_plaintext_short" />
+              <span><b>隐藏 plaintext 长度不足 32</b><small>默认开启，只屏蔽这种短包解密噪声。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.stream.hide_decrypt_failed" />
+              <span><b>隐藏全部解密失败包</b><small>会保留正常 data、ACK、注入事件。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.stream.hide_no_schema" />
+              <span><b>隐藏无 schema 包</b><small>只影响前端显示，不修改抓包历史文件。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.stream.hide_unknown_fields" />
+              <span><b>隐藏 decoded._unknown 字段</b><small>用于减少 proto 未知字段刷屏。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.stream.hide_common_noise" />
+              <span><b>屏蔽常见 heartbeat / 控制包</b><small>按下面的 opencode 列表过滤，保存后持久生效。</small></span>
+            </label>
+            <label class="setting-row setting-row-stack">
+              <span>屏蔽 opencode</span>
+              <textarea v-model="settings.stream.hidden_opcodes" placeholder="0x9001, 0x013D, 0x013F"></textarea>
+            </label>
+          </section>
+        </div>
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>HTTP 服务</h3>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.http.enabled" />
+              <span><b>启用 HTTP Web 服务</b><small>保存配置后需要重启主进程生效。</small></span>
+            </label>
+            <div class="setting-row two">
+              <label><span>Host</span><input v-model="settings.services.http.host" /></label>
+              <label><span>Port</span><input type="number" min="1" max="65535" v-model.number="settings.services.http.port" /></label>
+            </div>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.http.allow_remote" />
+              <span><b>允许非本机访问</b><small>仅记录配置; 生效需要重启并使用对应 host 绑定。</small></span>
+            </label>
+            <label class="setting-row">
+              <span>公开 URL</span>
+              <input v-model="settings.services.http.public_url" placeholder="http://127.0.0.1:18196/" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>MCP 服务</h3>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.mcp.enabled" />
+              <span><b>启用 MCP 服务</b><small>保存配置后需要重启主进程生效。</small></span>
+            </label>
+            <div class="setting-row two">
+              <label><span>Host</span><input v-model="settings.services.mcp.host" /></label>
+              <label><span>Port</span><input type="number" min="1" max="65535" v-model.number="settings.services.mcp.port" /></label>
+            </div>
+            <label class="setting-row">
+              <span>访问令牌</span>
+              <input type="password" autocomplete="off" v-model="settings.services.mcp.auth_token" placeholder="可留空" />
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.mcp.allow_inject" />
+              <span><b>允许 MCP 注入包</b><small>关闭时 MCP 只做只读查询。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.mcp.allow_rfn_exec" />
+              <span><b>允许 MCP 执行已加载 RFN</b><small>关闭时拒绝 rfn_exec 工具。</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.services.mcp.allow_rfn_import" />
+              <span><b>允许 MCP 临时导入 RFN</b><small>关闭时拒绝 rfn_import_run 工具。</small></span>
+            </label>
+          </section>
+        </div>
+
+        <div class="settings-note">
+          HTTP/MCP 目前写入 <span class="mono">config/settings.json</span> 并在状态栏标记；HTTP 绑定参数需要重启主进程生效。
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="showSettingsModal = false">取消</button>
+        <button class="btn-primary btn" @click="saveSettings" :disabled="settingsSaving">
+          {{ settingsSaving ? '保存中...' : '保存设置' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" v-if="showSaveModal" @click.self="showSaveModal = false">
+    <div class="modal">
+      <div class="modal-head">保存模板</div>
+      <div class="modal-body">
+        <div style="color:var(--text-3); font-size:12px;">
+          opcode = <span class="mono">{{ selectedOp?.hex }}</span>
+          ({{ selectedOp?.name }}) · 模式 = <span class="mono">{{ editMode }}</span>
+        </div>
+        <input v-model="saveName" placeholder="模板名 (仅字母 / 数字 / 中文 / _ - .)" autofocus
+               @keydown.enter="saveTemplate" />
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="showSaveModal = false">取消</button>
+        <button class="btn-primary btn" @click="saveTemplate" :disabled="!saveName.trim()">保存</button>
+      </div>
+    </div>
+  </div>
+
+</div>

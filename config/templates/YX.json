@@ -1,0 +1,11 @@
+{
+  "name": "YX",
+  "opcode_hex": "0x025F",
+  "opcode_name": "ZoneShopGetInfoReq",
+  "mode": "form",
+  "value": {
+    "shop_id": 3014
+  },
+  "payload_hex": null,
+  "updated_at": 1778143658.0772142
+}

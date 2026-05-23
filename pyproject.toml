@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roco-mitm-server"
+version = "2.1.0"
+description = "RocoMITMServer Ver2.1 Verzweifelt with Web UI, RFN runtime, MCP tools, and packed opcode schemas."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "花吹雪又一年" },
+]
+dependencies = [
+  "aiohttp>=3.9",
+  "pycryptodome>=3.20",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+divert = [
+  "pydivert>=2.1",
+]
+dev = [
+  "pytest>=8",
+  "protobuf>=4.25",
+]
+
+[project.scripts]
+roco-mitm = "roco_mitm.cli:main"
+roco-mitm-proxy = "roco_mitm.proxy.server:main"
+roco-mitm-divert = "roco_mitm.divert.proc_divert:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+roco_mitm = ["web/static/**/*"]
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

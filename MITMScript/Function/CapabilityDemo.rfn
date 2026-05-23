@@ -1,0 +1,123 @@
+.module roco.capability_demo
+.version 0.1
+.target rfn-vm-0.1
+
+; CapabilityDemo: exercises every RFN capability group from one HTTP entry,
+; plus a schedule tick and a packet handler with explicit schema condition.
+;
+; HTTP entry GET /rfn/cap-demo runs the full sequence and returns a summary
+; that lets tests/Web verify each subsystem.
+
+.function HttpCapDemo(req:http_req) -> http_rsp
+.no_side_effect false
+.deterministic false
+.max_ops 50000
+.capability "cache.read" scope="cap_demo" prefix=""
+.capability "cache.write" scope="cap_demo" prefix=""
+.capability "cache.read" scope="session" prefix="cap_demo"
+.capability "cache.write" scope="session" prefix="cap_demo"
+.capability "cache.read" scope="global" prefix="cap_demo"
+.capability "cache.write" scope="global" prefix="cap_demo"
+.capability "db.read" namespace="cap_demo"
+.capability "db.write" namespace="cap_demo"
+.capability "db.read" table="cap_demo_items"
+.capability "db.write" table="cap_demo_items"
+.capability "file.read" path="cap_demo.txt"
+.capability "file.write" path="cap_demo.txt"
+.capability "event.emit" prefix="script.cap_demo."
+.capability "http.server" path="/rfn/cap-demo"
+  cache.set "cap_demo", "counter", 1, 60000
+  cache.incr r0, "cap_demo", "counter", 1, 60000
+  cache.get r1, "cap_demo", "counter"
+  cache.has r2, "cap_demo", "counter"
+  cache.ttl r3, "cap_demo", "counter"
+  cache.set "session", "cap_demo.session_marker", "session-value", 60000
+  cache.set "global", "cap_demo.global_marker", "global-value", 60000
+  cache.get r29, "session", "cap_demo.session_marker"
+  cache.get r30, "global", "cap_demo.global_marker"
+  cache.set "cap_demo", "ttl_quick", "x", 1
+  buffer.push "cap_demo", "ring", "a", 4, 60000
+  buffer.push "cap_demo", "ring", "b", 4, 60000
+  buffer.push "cap_demo", "ring", "c", 4, 60000
+  buffer.latest r4, "cap_demo", "ring"
+  buffer.take r5, "cap_demo", "ring", 4
+  map.from_pairs r6, "name", "demo", "tier", 2
+  db.put "cap_demo", "row", r6, 60000
+  db.get r7, "cap_demo", "row"
+  db.has r8, "cap_demo", "row"
+  map.from_pairs r9, "id", 1
+  map.from_pairs r10, "name", "alpha"
+  db.upsert "cap_demo_items", r9, r10, 60000
+  map.from_pairs r11, "id", 2
+  map.from_pairs r12, "name", "beta"
+  db.upsert "cap_demo_items", r11, r12, 60000
+  map.new r13
+  db.select_all r14, "cap_demo_items", r13, 16
+  arr.len r15, r14
+  str.hex_to_bytes r16, "deadbeef"
+  db.put_blob "cap_demo", "blob1", r16, "application/octet-stream", 60000
+  db.get_blob r17, "cap_demo", "blob1"
+  db.begin r18
+  map.from_pairs r19, "name", "tx-keep"
+  db.put "cap_demo", "tx_keep", r19, 60000
+  db.commit r18
+  db.begin r20
+  map.from_pairs r21, "name", "tx-roll"
+  db.put "cap_demo", "tx_roll", r21, 60000
+  db.rollback r20
+  db.has r22, "cap_demo", "tx_keep"
+  db.has r23, "cap_demo", "tx_roll"
+  file.write_text "cap_demo.txt", "cap-demo-write", "utf-8", true
+  file.append_text "cap_demo.txt", "+append", "utf-8", true
+  file.read_text r24, "cap_demo.txt", "utf-8", 1048576
+  map.from_pairs r25, "stage", "demo"
+  event.emit "script.cap_demo.done", r25
+  map.from_pairs r26, "tag", "demo"
+  audit.write "cap_demo", "http_run", "ok", r26
+  audit.metric "cap_demo.runs", 1, r26
+  map.from_pairs r27, "ok", true, "cache_incr", r0, "cache_has", r2, "buffer_latest", r4, "buffer_taken", r5, "row", r7, "row_has", r8, "items_count", r15, "tx_keep_present", r22, "tx_roll_rolled_back", r23, "file_text", r24, "session_marker", r29, "global_marker", r30
+  http.resp_json r28, 200, r27
+  ret r28
+.end
+
+.function ScheduleCapDemo() -> u32
+.no_side_effect false
+.deterministic false
+.capability "db.read" namespace="cap_demo"
+.capability "db.write" namespace="cap_demo"
+.capability "event.emit" prefix="script.cap_demo."
+  db.get r0, "cap_demo", "schedule_count"
+  cmp.exists r1, r0
+  jnz r1, have
+  mov r0, 0
+have:
+  int.add r2, r0, 1
+  db.put "cap_demo", "schedule_count", r2, 0
+  map.from_pairs r3, "count", r2
+  event.emit "script.cap_demo.tick", r3
+  ret r2
+.end
+
+.function PacketCapDemo(pkt:obj) -> obj
+.no_side_effect false
+.deterministic false
+.capability "db.write" namespace="cap_demo"
+.capability "cache.write" scope="cap_demo" prefix=""
+  ; Schema-conditional trigger: only act when decoded.player_info.brief_info.role_level >= 10.
+  obj.get r0, arg0, "decoded.player_info.brief_info.role_level"
+  cmp.exists r1, r0
+  jz r1, skip
+  cmp.ge r2, r0, 10
+  jz r2, low_level
+  obj.get r3, arg0, "decoded.player_info.brief_info.uin"
+  map.from_pairs r4, "uin", r3, "role_level", r0
+  db.put "cap_demo", "last_packet", r4, 0
+  cache.set "cap_demo", "last_uin", r3, 60000
+  ret r4
+low_level:
+  map.from_pairs r5, "skipped", "low_level", "role_level", r0
+  ret r5
+skip:
+  map.from_pairs r6, "skipped", "missing_role_level"
+  ret r6
+.end
