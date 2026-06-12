@@ -80,6 +80,8 @@ class RFNLiveRuntime:
         self._job_history: dict[str, dict[str, Any]] = {}
         self._stats: dict[str, int] = {
             "packet_seen": 0,
+            "packet_matched": 0,
+            "packet_fast_ignored": 0,
             "packet_triggered": 0,
             "http_seen": 0,
             "http_handled": 0,
@@ -90,6 +92,15 @@ class RFNLiveRuntime:
             "drain_timeout": 0,
         }
         self.reload()
+
+    def wants_packet(self, packet: dict[str, Any]) -> bool:
+        if packet.get("kind") == "inject":
+            return False
+        runtime = self.runtime
+        if runtime is None:
+            return False
+        packet = _normalize_packet(packet)
+        return self._packet_has_active_interest(packet, runtime)
 
     def reload(self) -> dict[str, Any]:
         self._fail_pending("E_RELOAD", "RFN live runtime is reloading")
@@ -187,8 +198,13 @@ class RFNLiveRuntime:
         if runtime is None:
             return []
         packet = _normalize_packet(packet)
+        if not self._packet_has_active_interest(packet, runtime):
+            with self._lock:
+                self._stats["packet_fast_ignored"] += 1
+            return []
         with self._lock:
             self._stats["packet_seen"] += 1
+            self._stats["packet_matched"] += 1
         self._enter_active_call()
         try:
             self.observe_packet(packet)
@@ -208,6 +224,19 @@ class RFNLiveRuntime:
             return []
         finally:
             self._leave_active_call()
+
+    def _packet_has_active_interest(self, packet: dict[str, Any], runtime: RFNRuntime) -> bool:
+        with self._lock:
+            pending = list(self._pending.values())
+            manifest = dict(runtime.manifest or {})
+            host = self.host
+        for item in pending:
+            if _target_matches(item.rsp_target, packet, host):
+                return True
+        for binding in manifest.get("bindings") or []:
+            if binding.get("kind") == "packet" and _packet_binding_matches(binding, packet, host):
+                return True
+        return False
 
     def handle_http(self, request: dict[str, Any]) -> dict[str, Any]:
         runtime = self.runtime
@@ -794,6 +823,16 @@ def _target_matches(target: Any, packet: dict[str, Any], host: RFNHost | None) -
     if isinstance(opcode, int):
         candidates.add(f"0x{opcode:04X}")
     return bool(wanted & candidates)
+
+
+def _packet_binding_matches(binding: dict[str, Any], packet: dict[str, Any], host: RFNHost | None) -> bool:
+    direction = binding.get("direction")
+    if direction and str(packet.get("direction") or "").lower() != str(direction).lower():
+        return False
+    target = binding.get("target")
+    if target is None:
+        return True
+    return _target_matches(target, packet, host)
 
 
 def _normalize_http_response(value: Any) -> dict[str, Any]:

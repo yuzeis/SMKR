@@ -39,15 +39,32 @@ export function useStream({ capacity = 5000 } = {}) {
     return [];
   }
 
-  function push(ev) {
-    ordinalBySeq.set(ev.seq, nextOrdinal++);
-    items.value.push(ev);
-    const dropped = trimToCapacity();
+  function recordPacketCounters(ev) {
     if (ev.type === 'packet') {
       if (ev.direction === 'c2s') lastSecond.value.c2s += 1;
       else if (ev.direction === 's2c') lastSecond.value.s2c += 1;
     }
+  }
+
+  function push(ev) {
+    ordinalBySeq.set(ev.seq, nextOrdinal++);
+    items.value.push(ev);
+    const dropped = trimToCapacity();
+    recordPacketCounters(ev);
     return dropped;
+  }
+
+  function pushBatch(events) {
+    if (!Array.isArray(events) || events.length === 0) return [];
+    for (const ev of events) {
+      ordinalBySeq.set(ev.seq, nextOrdinal++);
+      recordPacketCounters(ev);
+    }
+    const chunkSize = 512;
+    for (let i = 0; i < events.length; i += chunkSize) {
+      items.value.push(...events.slice(i, i + chunkSize));
+    }
+    return trimToCapacity();
   }
 
   function update(seq, patch) {
@@ -90,5 +107,5 @@ export function useStream({ capacity = 5000 } = {}) {
     return trimToCapacity();
   }
 
-  return { items, expanded, maxItems, push, update, clear, toggleExpand, fmtTime, lastSecond, tickSecond, setCapacity };
+  return { items, expanded, maxItems, push, pushBatch, update, clear, toggleExpand, fmtTime, lastSecond, tickSecond, setCapacity };
 }

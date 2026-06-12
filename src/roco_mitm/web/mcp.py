@@ -186,6 +186,13 @@ def _tool_encode_payload(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
 def _tool_inject_packet(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     if not _mcp_settings(ctx).get("allow_inject"):
         raise PermissionError("MCP inject_packet is disabled by settings.services.mcp.allow_inject")
+    direction = str(args.get("direction") or "c2s").strip().lower()
+    if direction not in {"c2s", "s2c"}:
+        raise ValueError(f"unsupported inject direction: {direction!r}")
+    if direction == "s2c":
+        if not proxy_mod.get_options().allow_s2c_inject:
+            raise PermissionError("S2C inject is disabled by settings.proxy.allow_s2c_inject")
+        raise NotImplementedError("S2C inject is not implemented")
     sess = proxy_mod.get_active_session()
     if sess is None:
         return {"ok": False, "error_code": "E_NO_SESSION", "error": "no active MITM session"}

@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Roco MITM Performance</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101216;
+      --panel: #181b22;
+      --line: #2a2f3a;
+      --text: #edf0f5;
+      --muted: #9aa3b2;
+      --accent: #35b7a5;
+      --warn: #d9a441;
+      --bad: #df6b6b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: #14171d;
+    }
+    h1, h2 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 20px; }
+    h2 { font-size: 15px; margin-bottom: 12px; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+      padding: 20px 24px 28px;
+    }
+    .toolbar, .summary, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      background: var(--line);
+    }
+    .summary div {
+      min-height: 72px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .label { color: var(--muted); font-size: 12px; }
+    .value { display: block; margin-top: 6px; font-size: 18px; font-weight: 650; }
+    section { padding: 14px; overflow: hidden; }
+    button, a.button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #222732;
+      color: var(--text);
+      padding: 7px 12px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #061210; }
+    button.danger { background: #3a2224; border-color: #5f3034; color: #ffd9d9; }
+    input {
+      width: 110px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #11141a;
+      color: var(--text);
+      padding: 7px 9px;
+    }
+    .field { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 9px;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .status-on { color: var(--accent); }
+    .status-off { color: var(--muted); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    @media (max-width: 860px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .summary { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .toolbar { align-items: stretch; }
+      .field { width: 100%; justify-content: space-between; }
+      input { width: 140px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Roco MITM Performance</h1>
+      <div class="label">Light metrics are always sampled. Detail events are collected only after Start detail.</div>
+    </div>
+    <a class="button" href="/">Back to main</a>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <button id="startBtn" class="primary">Start detail</button>
+      <button id="stopBtn">Stop</button>
+      <button id="clearBtn" class="danger">Clear</button>
+      <a class="button" href="/api/perf/detail/export">Export JSONL</a>
+      <label class="field">Max seconds <input id="maxSeconds" type="number" min="1" max="3600" /></label>
+      <label class="field">Max events <input id="maxEvents" type="number" min="100" max="1000000" step="100" /></label>
+      <span id="detailState" class="label"></span>
+    </div>
+
+    <div class="summary">
+      <div><span class="label">Process CPU</span><span id="cpu" class="value">-</span></div>
+      <div><span class="label">RSS</span><span id="rss" class="value">-</span></div>
+      <div><span class="label">Outbound queue</span><span id="queue" class="value">-</span></div>
+      <div><span class="label">Detail events</span><span id="events" class="value">-</span></div>
+    </div>
+
+    <section>
+      <h2>Light Aggregates</h2>
+      <table>
+        <thead><tr><th>Metric</th><th class="num">Count</th><th class="num">Avg ms</th><th class="num">Max ms</th><th class="num">Bytes</th><th class="num">MB/s</th></tr></thead>
+        <tbody id="lightRows"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Detail Groups</h2>
+      <table>
+        <thead><tr><th>Direction</th><th>Stage</th><th class="num">Count</th><th class="num">Avg ms</th><th class="num">Max ms</th><th class="num">Bytes</th></tr></thead>
+        <tbody id="detailRows"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recent Detail Events</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Direction</th><th>Stage</th><th class="num">Elapsed ms</th><th class="num">Bytes</th><th>Seq</th><th>Command</th></tr></thead>
+        <tbody id="eventRows"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const ids = Object.fromEntries([
+      'startBtn', 'stopBtn', 'clearBtn', 'maxSeconds', 'maxEvents', 'detailState',
+      'cpu', 'rss', 'queue', 'events', 'lightRows', 'detailRows', 'eventRows',
+    ].map((id) => [id, document.getElementById(id)]));
+
+    let pollMs = 1000;
+    let timer = 0;
+
+    function fmtMs(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return '-';
+      return n >= 100 ? n.toFixed(1) : n.toFixed(3);
+    }
+
+    function fmtNum(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toLocaleString() : '-';
+    }
+
+    function row(cells) {
+      return `<tr>${cells.map(([value, cls]) => `<td class="${cls || ''}">${value}</td>`).join('')}</tr>`;
+    }
+
+    async function api(url, options) {
+      const rsp = await fetch(url, options);
+      if (!rsp.ok) throw new Error(`${rsp.status} ${rsp.statusText}`);
+      return rsp.json();
+    }
+
+    async function loadStatus() {
+      const data = await api('/api/perf/status');
+      const settings = data.settings || {};
+      ids.maxSeconds.value = settings.detail_max_seconds || 60;
+      ids.maxEvents.value = settings.detail_max_events || 20000;
+      pollMs = Math.max(250, Math.min(10000, Number(settings.snapshot_interval_ms) || 1000));
+      renderDetailStatus(data.detail || {});
+    }
+
+    function renderDetailStatus(status) {
+      const on = Boolean(status.enabled);
+      ids.detailState.className = on ? 'status-on' : 'status-off';
+      ids.detailState.textContent = on
+        ? `detail on, ${fmtNum(status.event_count)} events, ${fmtMs(status.elapsed_sec * 1000)} ms elapsed`
+        : `detail off, ${fmtNum(status.event_count)} events`;
+      ids.events.textContent = `${fmtNum(status.event_count)} / ${fmtNum(status.max_events)}`;
+    }
+
+    async function refresh() {
+      try {
+        const snap = await api('/api/perf/snapshot');
+        const light = snap.light || {};
+        const detail = snap.detail || {};
+        renderDetailStatus(detail.status || {});
+        ids.cpu.textContent = `${fmtMs(light.process_cpu_pct)}%`;
+        ids.rss.textContent = light.rss_mb == null ? '-' : `${fmtMs(light.rss_mb)} MB`;
+        const q = light.queue || {};
+        ids.queue.textContent = `${fmtNum(q.outbound_depth)} / ${fmtNum(q.outbound_max)}`;
+        ids.lightRows.innerHTML = Object.entries(light.metrics || {})
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, m]) => row([
+            [name, 'mono'],
+            [fmtNum(m.count), 'num'],
+            [fmtMs(m.avg_ms), 'num'],
+            [fmtMs(m.max_ms), 'num'],
+            [fmtNum(m.bytes), 'num'],
+            [fmtMs(m.mbps), 'num'],
+          ])).join('') || row([['No light metrics in current window.', 'label'], ['', ''], ['', ''], ['', ''], ['', ''], ['', '']]);
+        ids.detailRows.innerHTML = (detail.groups || [])
+          .sort((a, b) => `${a.direction}.${a.stage}`.localeCompare(`${b.direction}.${b.stage}`))
+          .map((g) => row([
+            [g.direction || '', 'mono'],
+            [g.stage || '', 'mono'],
+            [fmtNum(g.count), 'num'],
+            [fmtMs(g.avg_ms), 'num'],
+            [fmtMs(g.max_ms), 'num'],
+            [fmtNum(g.bytes), 'num'],
+          ])).join('') || row([['No detail groups. Click Start detail.', 'label'], ['', ''], ['', ''], ['', ''], ['', ''], ['', '']]);
+        await refreshEvents();
+      } catch (err) {
+        ids.detailState.className = 'bad';
+        ids.detailState.textContent = String(err.message || err);
+      } finally {
+        timer = window.setTimeout(refresh, pollMs);
+      }
+    }
+
+    async function refreshEvents() {
+      const data = await api('/api/perf/detail/events?limit=120');
+      ids.eventRows.innerHTML = (data.events || []).slice().reverse().map((ev) => row([
+        [new Date((ev.ts || 0) * 1000).toLocaleTimeString(), 'mono'],
+        [ev.direction || '', 'mono'],
+        [ev.stage || '', 'mono'],
+        [fmtMs(ev.elapsed_ms), 'num'],
+        [fmtNum(ev.bytes), 'num'],
+        [ev.gcp_seq == null ? '' : fmtNum(ev.gcp_seq), 'num'],
+        [ev.command_name || ev.command || '', 'mono'],
+      ])).join('') || row([['No recent detail events.', 'label'], ['', ''], ['', ''], ['', ''], ['', ''], ['', ''], ['', '']]);
+    }
+
+    ids.startBtn.addEventListener('click', async () => {
+      await api('/api/perf/detail/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          max_seconds: Number(ids.maxSeconds.value) || 60,
+          max_events: Number(ids.maxEvents.value) || 20000,
+        }),
+      });
+      await refresh();
+    });
+    ids.stopBtn.addEventListener('click', async () => {
+      await api('/api/perf/detail/stop', { method: 'POST' });
+      await refresh();
+    });
+    ids.clearBtn.addEventListener('click', async () => {
+      await api('/api/perf/detail/clear', { method: 'POST' });
+      await refresh();
+    });
+
+    window.addEventListener('beforeunload', () => window.clearTimeout(timer));
+    loadStatus().then(refresh);
+  </script>
+</body>
+</html>

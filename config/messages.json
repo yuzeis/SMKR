@@ -1,7 +1,7 @@
 {
   "_generated_by": "tools/gen_proto_schema.py",
   "_source": {
-    "release": "RocoMITMServer_Ver2.1_Verzweifelt"
+    "release": "RocoMITMServer_Ver2.3_Untergangsgeweiht"
   },
   "messages": {
     ".Next.BuffData_32_Skill": {

@@ -118,7 +118,7 @@ def _print_banner(url: str, args: argparse.Namespace, log_path: Path) -> None:
     upstream = f"{args.upstream_ip}:{args.upstream_port}" if args.upstream_ip else "auto via runtime/conn_map.json or process watcher"
     print()
     print("=" * 62)
-    print("RocoMITMServer Ver2.1 Verzweifelt (RKMS) - Web Mode")
+    print("RocoMITMServer Ver2.3 Untergangsgeweiht (RKMS) - Web Mode")
     print("=" * 62)
     print(f"Web UI : {url}")
     print(f"Proxy  : {args.listen_host}:{args.listen_port}")

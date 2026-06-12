@@ -5,7 +5,7 @@
     "default_filter": "",
     "hide_plaintext_short": true,
     "hide_decrypt_failed": false,
-    "hide_no_schema": false,
+    "hide_no_schema": true,
     "hide_unknown_fields": false,
     "hide_common_noise": true,
     "hidden_opcodes": "0x9001, 0x013D, 0x013F, 0x013E,0x0414"
@@ -27,5 +27,26 @@
       "allow_rfn_exec": false,
       "allow_rfn_import": false
     }
+  },
+  "proxy": {
+    "s2c_passthrough_after_key": false,
+    "observe_s2c": true,
+    "allow_s2c_inject": false,
+    "observe_c2s": true,
+    "c2s_batch_packets": 64,
+    "c2s_batch_bytes": 262144,
+    "c2s_drain_interval_ms": 0,
+    "observe_queue_max": 2000
+  },
+  "observe": {
+    "auto_decode_packets": false,
+    "decode_on_click": true,
+    "rfn_active_watch_only": true,
+    "rfn_passive_packet_seen": false
+  },
+  "perf": {
+    "detail_max_seconds": 60,
+    "detail_max_events": 20000,
+    "snapshot_interval_ms": 1000
   }
 }

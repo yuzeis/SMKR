@@ -67,6 +67,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "allow_rfn_import": False,
         },
     },
+    "proxy": proxy_mod.normalize_proxy_options({}),
+    "observe": {
+        "auto_decode_packets": False,
+        "decode_on_click": True,
+        "rfn_active_watch_only": True,
+        "rfn_passive_packet_seen": False,
+    },
+    "perf": {
+        "detail_max_seconds": 60,
+        "detail_max_events": 20000,
+        "snapshot_interval_ms": 1000,
+    },
 }
 
 
@@ -78,6 +90,68 @@ def _deep_merge(base: dict, patch: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+def _as_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        out = default
+    return max(min_value, min(max_value, out))
+
+
+def _normalize_perf_settings(data: dict[str, Any] | None) -> dict[str, Any]:
+    src = data if isinstance(data, dict) else {}
+    defaults = DEFAULT_SETTINGS["perf"]
+    return {
+        "detail_max_seconds": _as_int(
+            src.get("detail_max_seconds"),
+            int(defaults["detail_max_seconds"]),
+            min_value=1,
+            max_value=3600,
+        ),
+        "detail_max_events": _as_int(
+            src.get("detail_max_events"),
+            int(defaults["detail_max_events"]),
+            min_value=100,
+            max_value=1_000_000,
+        ),
+        "snapshot_interval_ms": _as_int(
+            src.get("snapshot_interval_ms"),
+            int(defaults["snapshot_interval_ms"]),
+            min_value=250,
+            max_value=10000,
+        ),
+    }
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _normalize_observe_settings(data: dict[str, Any] | None) -> dict[str, Any]:
+    src = data if isinstance(data, dict) else {}
+    defaults = DEFAULT_SETTINGS["observe"]
+    return {
+        "auto_decode_packets": _as_bool(
+            src.get("auto_decode_packets"), bool(defaults["auto_decode_packets"])
+        ),
+        "decode_on_click": _as_bool(src.get("decode_on_click"), bool(defaults["decode_on_click"])),
+        "rfn_active_watch_only": _as_bool(
+            src.get("rfn_active_watch_only"), bool(defaults["rfn_active_watch_only"])
+        ),
+        "rfn_passive_packet_seen": _as_bool(
+            src.get("rfn_passive_packet_seen"), bool(defaults["rfn_passive_packet_seen"])
+        ),
+    }
 
 
 def _normalize_settings(data: dict | None) -> dict:
@@ -97,6 +171,9 @@ def _normalize_settings(data: dict | None) -> dict:
     patch["services"] = services
     normalized = _deep_merge(DEFAULT_SETTINGS, patch)
     normalized.get("services", {}).pop("https", None)
+    normalized["proxy"] = proxy_mod.normalize_proxy_options(normalized.get("proxy"))
+    normalized["observe"] = _normalize_observe_settings(normalized.get("observe"))
+    normalized["perf"] = _normalize_perf_settings(normalized.get("perf"))
     return normalized
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff][A-Za-z0-9_.\u4e00-\u9fff -]{0,63}$")
@@ -242,6 +319,7 @@ class AppContext:
         self.templates = JsonStore(config_dir / "templates")
         self.filters = JsonStore(config_dir / "filters")
         self.settings = SettingsStore(config_dir / "settings.json")
+        proxy_mod.install_options(self.settings.get().get("proxy", {}))
         self._http_service = {
             "host": "127.0.0.1",
             "port": 18196,
@@ -470,11 +548,18 @@ class AppContext:
     def _enqueue_packet_event(self, ev: dict) -> None:
         decode_job = self._prepare_packet_event(ev)
         published = self.bus.publish(ev)
+        observe_settings = self.settings.get().get("observe", {})
+        auto_decode = bool(observe_settings.get("auto_decode_packets"))
         if decode_job is None:
-            if ev.get("opcode") is not None:
+            if self._should_enqueue_rfn_packet(ev):
                 self._enqueue_rfn_packet(ev, {"decode_status": ev.get("decode_status", "raw")})
             return
         decode_job["target_seq"] = published["seq"]
+        decode_job["packet"]["seq"] = published["seq"]
+        if not auto_decode:
+            if self._should_enqueue_rfn_packet(ev):
+                self._enqueue_rfn_packet(ev, {"decode_status": ev.get("decode_status", "deferred")})
+            return
         priority = self._decode_priority(ev)
         if self._packet_queue is None:
             self._packet_queue = asyncio.PriorityQueue(maxsize=self._packet_queue_capacity)
@@ -509,7 +594,8 @@ class AppContext:
         payload_hex = ev.get("payload_hex")
         if not payload_hex:
             return None
-        ev["decode_status"] = "queued"
+        auto_decode = bool(self.settings.get().get("observe", {}).get("auto_decode_packets"))
+        ev["decode_status"] = "queued" if auto_decode else "deferred"
         return {"opcode": opcode_int, "payload_hex": str(payload_hex), "packet": dict(ev)}
 
     def _decode_priority(self, ev: dict) -> int:
@@ -581,6 +667,8 @@ class AppContext:
         for key in ("decoded", "decode_status", "decode_source", "decode_error"):
             if key in patch:
                 enriched[key] = patch[key]
+        if not self._should_enqueue_rfn_packet(enriched):
+            return
         if self._rfn_packet_queue is None:
             self._rfn_packet_queue = asyncio.Queue(maxsize=self._rfn_queue_capacity)
         if self._rfn_packet_worker_task is None or self._rfn_packet_worker_task.done():
@@ -602,6 +690,18 @@ class AppContext:
             assert self._rfn_packet_queue is not None
             packet = await self._rfn_packet_queue.get()
             loop = asyncio.get_running_loop()
+            if self._packet_needs_decode_for_rfn(packet):
+                job = {
+                    "target_seq": int(packet.get("seq") or 0),
+                    "opcode": int(packet["opcode"]),
+                    "payload_hex": str(packet["payload_hex"]),
+                }
+                patch = await loop.run_in_executor(None, self._decode_packet_patch, job)
+                for key in ("decoded", "decode_status", "decode_source", "decode_error"):
+                    if key in patch:
+                        packet[key] = patch[key]
+                if patch.get("target_seq"):
+                    self.bus.publish(patch)
             results = await loop.run_in_executor(None, self.rfn.handle_packet, packet)
             if results:
                 meta = packet.get("opcode_meta") if isinstance(packet.get("opcode_meta"), dict) else {}
@@ -619,6 +719,23 @@ class AppContext:
                     "ts": time.time(),
                 }
                 self.bus.publish(_json_safe(event))
+
+    def _should_enqueue_rfn_packet(self, packet: dict) -> bool:
+        if self.rfn.runtime is None or packet.get("kind") == "inject":
+            return False
+        observe_settings = self.settings.get().get("observe", {})
+        if bool(observe_settings.get("rfn_passive_packet_seen")):
+            return packet.get("opcode") is not None
+        if bool(observe_settings.get("rfn_active_watch_only", True)):
+            return self.rfn.wants_packet(packet)
+        return packet.get("opcode") is not None
+
+    def _packet_needs_decode_for_rfn(self, packet: dict) -> bool:
+        if packet.get("decoded") is not None:
+            return False
+        if packet.get("opcode") is None or not packet.get("payload_hex"):
+            return False
+        return packet.get("decode_status") in {None, "", "raw", "queued", "deferred", "no_schema"}
 
     async def _rfn_schedule_loop(self) -> None:
         while True:
@@ -1189,7 +1306,7 @@ async def handle_rfn_job_enable(request: web.Request) -> web.Response:
 
 
 
-RKS_VERSION = "0.0"
+RKS_VERSION = "2.3.0"
 RKS_STATUS = "reserved"
 
 
@@ -1240,7 +1357,71 @@ async def handle_settings_save(request: web.Request) -> web.Response:
     ctx: AppContext = request.app["ctx"]
     body = await request.json()
     settings = ctx.settings.save(body.get("settings", body))
+    proxy_mod.install_options(settings.get("proxy", {}))
     return web.json_response({"ok": True, "settings": settings})
+
+
+async def handle_perf_page(request: web.Request) -> web.FileResponse:
+    ctx: AppContext = request.app["ctx"]
+    return web.FileResponse(ctx.static_dir / "assets" / "perf.html")
+
+
+async def handle_perf_status(request: web.Request) -> web.Response:
+    ctx: AppContext = request.app["ctx"]
+    return web.json_response({
+        "settings": ctx.settings.get().get("perf", {}),
+        "proxy": proxy_mod.normalize_proxy_options(proxy_mod.get_options().__dict__),
+        "detail": proxy_mod.perf_detail_status(),
+    })
+
+
+async def handle_perf_snapshot(request: web.Request) -> web.Response:
+    return web.json_response({
+        "light": proxy_mod.perf_snapshot(),
+        "detail": proxy_mod.perf_detail_snapshot(),
+    })
+
+
+async def handle_perf_detail_start(request: web.Request) -> web.Response:
+    ctx: AppContext = request.app["ctx"]
+    settings = ctx.settings.get().get("perf", {})
+    body = await request.json() if request.can_read_body else {}
+    status = proxy_mod.perf_detail_start(
+        max_seconds=body.get("max_seconds", settings.get("detail_max_seconds", 60)),
+        max_events=body.get("max_events", settings.get("detail_max_events", 20000)),
+    )
+    return web.json_response({"ok": True, "detail": status})
+
+
+async def handle_perf_detail_stop(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True, "detail": proxy_mod.perf_detail_stop()})
+
+
+async def handle_perf_detail_clear(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True, "detail": proxy_mod.perf_detail_clear()})
+
+
+async def handle_perf_detail_events(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit") or 500)
+    except ValueError:
+        limit = 500
+    limit = max(1, min(10000, limit))
+    return web.json_response({
+        "status": proxy_mod.perf_detail_status(),
+        "events": proxy_mod.perf_detail_events(limit=limit),
+    })
+
+
+async def handle_perf_detail_export(request: web.Request) -> web.Response:
+    body = proxy_mod.perf_detail_export_jsonl()
+    if body:
+        body += "\n"
+    return web.Response(
+        text=body,
+        content_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="roco_perf_detail.jsonl"'},
+    )
 
 
 async def handle_opcodes(request: web.Request) -> web.Response:
@@ -1401,8 +1582,8 @@ async def _safe_send_json(ws: web.WebSocketResponse, payload: dict) -> bool:
 
 async def _ws_sender(ws: web.WebSocketResponse, queue: asyncio.Queue) -> None:
     """从 EventBus 拉取事件并批量发送给浏览器。"""
-    BATCH_MAX = 32
-    BATCH_WINDOW = 0.04  # 40ms
+    BATCH_MAX = 256
+    BATCH_WINDOW = 0.08  # 80ms
     loop = asyncio.get_running_loop()
     while True:
         first = await queue.get()
@@ -1467,6 +1648,13 @@ async def _handle_ws_command(ctx: AppContext, ws: web.WebSocketResponse, data: d
                 )
             else:
                 payload = bytes.fromhex(payload_hex)
+            direction = str(data.get("direction") or "c2s").strip().lower()
+            if direction not in {"c2s", "s2c"}:
+                raise ValueError(f"unsupported inject direction: {direction!r}")
+            if direction == "s2c":
+                if not proxy_mod.get_options().allow_s2c_inject:
+                    raise proxy_mod.InjectError("S2C inject is disabled by settings.proxy.allow_s2c_inject")
+                raise proxy_mod.InjectError("S2C inject is not implemented")
             sess = proxy_mod.get_active_session()
             if sess is None:
                 raise proxy_mod.InjectError("无活动会话")
@@ -1528,8 +1716,16 @@ def build_app(ctx: AppContext) -> web.Application:
     app.router.add_post("/api/rks/compile-dryrun", handle_rks_compile_dryrun)
     app.router.add_post("/api/rks/run-dryrun", handle_rks_run_dryrun)
     app.router.add_get("/rfn-console", handle_rfn_console_page)
+    app.router.add_get("/perf", handle_perf_page)
     app.router.add_get("/api/settings", handle_settings)
     app.router.add_post("/api/settings", handle_settings_save)
+    app.router.add_get("/api/perf/status", handle_perf_status)
+    app.router.add_get("/api/perf/snapshot", handle_perf_snapshot)
+    app.router.add_post("/api/perf/detail/start", handle_perf_detail_start)
+    app.router.add_post("/api/perf/detail/stop", handle_perf_detail_stop)
+    app.router.add_post("/api/perf/detail/clear", handle_perf_detail_clear)
+    app.router.add_get("/api/perf/detail/events", handle_perf_detail_events)
+    app.router.add_get("/api/perf/detail/export", handle_perf_detail_export)
     app.router.add_get("/api/opcodes", handle_opcodes)
     app.router.add_get("/api/opcodes/{op}", handle_opcode_detail)
     app.router.add_post("/api/decode", handle_decode)

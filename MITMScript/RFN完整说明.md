@@ -1,6 +1,6 @@
 # RFN 完整说明
 
-RFN 是 RocoMITMServer Ver2.1 Verzweifelt 的 MITMScript 底层能力语言,用于定义可审计、可回放、可通过 Web/MCP 调用的本地脚本能力。
+RFN 是 RocoMITMServer Ver2.3 Untergangsgeweiht 的 MITMScript 底层能力语言,用于定义可审计、可回放、可通过 Web/MCP 调用的本地脚本能力。
 
 ## 1. RFN 定位
 

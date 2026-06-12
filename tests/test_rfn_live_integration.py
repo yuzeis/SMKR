@@ -102,6 +102,39 @@ end
         live.close()
 
 
+def test_rfn_live_skips_unwatched_packets(tmp_path) -> None:
+    script_root, function_dir, manifest_dir = _script_dirs(tmp_path)
+    (function_dir / "Packet.rfn").write_text(
+        """
+.function OnLogin(pkt:obj) -> bool
+  ret true
+.end
+""",
+        encoding="utf-8",
+    )
+    (manifest_dir / "Packet.rfnmanifest").write_text(
+        """
+bind packet login
+  direction s2c
+  target 0x0102
+  func Function.OnLogin
+end
+""",
+        encoding="utf-8",
+    )
+    live = RFNLiveRuntime(script_root=script_root, db_path=tmp_path / "live.sqlite", file_root=tmp_path)
+    try:
+        ignored = live.handle_packet({"direction": "s2c", "opcode": 0x0103, "opcode_hex": "0x0103"})
+        stats = live.status()["stats"]
+
+        assert ignored == []
+        assert stats["packet_seen"] == 0
+        assert stats["packet_matched"] == 0
+        assert stats["packet_fast_ignored"] == 1
+    finally:
+        live.close()
+
+
 def test_rfn_live_query_waits_for_observed_response(tmp_path) -> None:
     script_root, function_dir, _manifest_dir = _script_dirs(tmp_path)
     (function_dir / "Query.rfn").write_text(

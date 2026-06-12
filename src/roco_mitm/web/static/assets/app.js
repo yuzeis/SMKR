@@ -39,8 +39,29 @@ const DEFAULT_SETTINGS = {
       allow_rfn_import: false,
     },
   },
+  proxy: {
+    s2c_passthrough_after_key: false,
+    observe_s2c: true,
+    allow_s2c_inject: false,
+    observe_c2s: true,
+    c2s_batch_packets: 64,
+    c2s_batch_bytes: 262144,
+    c2s_drain_interval_ms: 0,
+    observe_queue_max: 2000,
+  },
+  observe: {
+    auto_decode_packets: false,
+    decode_on_click: true,
+    rfn_active_watch_only: true,
+    rfn_passive_packet_seen: false,
+  },
+  perf: {
+    detail_max_seconds: 60,
+    detail_max_events: 20000,
+    snapshot_interval_ms: 1000,
+  },
 };
-const STREAM_RENDER_LIMIT = 700;
+const STREAM_RENDER_LIMIT = 300;
 const SCROLL_THROTTLE_MS = 50;
 
 function migrateSettingsInput(input) {
@@ -86,6 +107,21 @@ function sanitizeSettings(input) {
   next.services.http.public_url = String(next.services.http.public_url || '');
   next.services.mcp.port = Math.max(1, Math.min(65535, Number(next.services.mcp.port) || 18210));
   next.services.mcp.auth_token = String(next.services.mcp.auth_token || '');
+  next.proxy.s2c_passthrough_after_key = Boolean(next.proxy.s2c_passthrough_after_key);
+  next.proxy.observe_s2c = Boolean(next.proxy.observe_s2c);
+  next.proxy.allow_s2c_inject = Boolean(next.proxy.allow_s2c_inject);
+  next.proxy.observe_c2s = Boolean(next.proxy.observe_c2s);
+  next.proxy.c2s_batch_packets = Math.max(1, Math.min(1024, Number(next.proxy.c2s_batch_packets) || 64));
+  next.proxy.c2s_batch_bytes = Math.max(1024, Math.min(8 * 1024 * 1024, Number(next.proxy.c2s_batch_bytes) || 262144));
+  next.proxy.c2s_drain_interval_ms = Math.max(0, Math.min(1000, Number(next.proxy.c2s_drain_interval_ms) || 0));
+  next.proxy.observe_queue_max = Math.max(0, Math.min(100000, Number(next.proxy.observe_queue_max) || 0));
+  next.observe.auto_decode_packets = Boolean(next.observe.auto_decode_packets);
+  next.observe.decode_on_click = Boolean(next.observe.decode_on_click);
+  next.observe.rfn_active_watch_only = Boolean(next.observe.rfn_active_watch_only);
+  next.observe.rfn_passive_packet_seen = Boolean(next.observe.rfn_passive_packet_seen);
+  next.perf.detail_max_seconds = Math.max(1, Math.min(3600, Number(next.perf.detail_max_seconds) || 60));
+  next.perf.detail_max_events = Math.max(100, Math.min(1000000, Number(next.perf.detail_max_events) || 20000));
+  next.perf.snapshot_interval_ms = Math.max(250, Math.min(10000, Number(next.perf.snapshot_interval_ms) || 1000));
   return next;
 }
 
@@ -446,6 +482,11 @@ const App = {
       ws_connected: false,
       services: deepMerge(DEFAULT_SETTINGS.services, {}),
     });
+    const liveCounters = reactive({
+      c2s: 0,
+      s2c: 0,
+      inject: 0,
+    });
     const perf = reactive({
       window_sec: 0,
       process_cpu_pct: 0,
@@ -581,7 +622,7 @@ const App = {
       }
     }
 
-    function upsertVisibleEvent(ev) {
+    function upsertVisibleEvent(ev, { scroll = true } = {}) {
       const displayEv = normalizePacketForDisplay(ev);
       const isVisible = eventPassesVisibleFilters(displayEv);
       const ordinal = visibleOrdinalBySeq.get(displayEv.seq);
@@ -600,8 +641,48 @@ const App = {
       visibleOrdinalBySeq.set(displayEv.seq, visibleNextOrdinal++);
       visibleStream.value.push(displayEv);
       trimVisibleToCapacity();
-      scheduleScrollBottom();
+      if (scroll) scheduleScrollBottom();
       return displayEv;
+    }
+
+    function appendVisibleEvents(events) {
+      if (!Array.isArray(events) || events.length === 0) return;
+      const pendingVisible = [];
+      let changed = false;
+      for (const ev of events) {
+        const displayEv = normalizePacketForDisplay(ev);
+        maybeCaptureInjectReply(displayEv);
+        const isVisible = eventPassesVisibleFilters(displayEv);
+        const ordinal = visibleOrdinalBySeq.get(displayEv.seq);
+        if (!isVisible) {
+          if (ordinal != null) {
+            removeVisibleBySeq(displayEv.seq);
+            changed = true;
+          }
+          continue;
+        }
+        if (ordinal != null) {
+          const idx = ordinal - visibleHeadOrdinal;
+          if (idx >= 0 && idx < visibleStream.value.length) {
+            visibleStream.value.splice(idx, 1, displayEv);
+            changed = true;
+          } else {
+            visibleOrdinalBySeq.delete(displayEv.seq);
+          }
+          continue;
+        }
+        visibleOrdinalBySeq.set(displayEv.seq, visibleNextOrdinal++);
+        pendingVisible.push(displayEv);
+      }
+      const chunkSize = 512;
+      for (let i = 0; i < pendingVisible.length; i += chunkSize) {
+        visibleStream.value.push(...pendingVisible.slice(i, i + chunkSize));
+      }
+      if (pendingVisible.length) {
+        trimVisibleToCapacity();
+        changed = true;
+      }
+      if (changed) scheduleScrollBottom();
     }
 
     function dropVisibleEvents(dropped) {
@@ -658,6 +739,17 @@ const App = {
       if (settings.services.http.port !== httpPort) settings.services.http.port = httpPort;
       const mcpPort = Math.max(1, Math.min(65535, Number(settings.services.mcp.port) || 18210));
       if (settings.services.mcp.port !== mcpPort) settings.services.mcp.port = mcpPort;
+      settings.proxy.c2s_batch_packets = Math.max(1, Math.min(1024, Number(settings.proxy.c2s_batch_packets) || 64));
+      settings.proxy.c2s_batch_bytes = Math.max(1024, Math.min(8 * 1024 * 1024, Number(settings.proxy.c2s_batch_bytes) || 262144));
+      settings.proxy.c2s_drain_interval_ms = Math.max(0, Math.min(1000, Number(settings.proxy.c2s_drain_interval_ms) || 0));
+      settings.proxy.observe_queue_max = Math.max(0, Math.min(100000, Number(settings.proxy.observe_queue_max) || 0));
+      settings.observe.auto_decode_packets = Boolean(settings.observe.auto_decode_packets);
+      settings.observe.decode_on_click = Boolean(settings.observe.decode_on_click);
+      settings.observe.rfn_active_watch_only = Boolean(settings.observe.rfn_active_watch_only);
+      settings.observe.rfn_passive_packet_seen = Boolean(settings.observe.rfn_passive_packet_seen);
+      settings.perf.detail_max_seconds = Math.max(1, Math.min(3600, Number(settings.perf.detail_max_seconds) || 60));
+      settings.perf.detail_max_events = Math.max(100, Math.min(1000000, Number(settings.perf.detail_max_events) || 20000));
+      settings.perf.snapshot_interval_ms = Math.max(250, Math.min(10000, Number(settings.perf.snapshot_interval_ms) || 1000));
       if (Array.isArray(settings.stream.hidden_opcodes)) {
         settings.stream.hidden_opcodes = settings.stream.hidden_opcodes.join(', ');
       } else if (settings.stream.hidden_opcodes == null) {
@@ -737,9 +829,63 @@ const App = {
       perf.metrics = data.metrics || {};
     }
 
+    let liveCounterStartTs = 0;
+    const pendingPackets = [];
+    let packetFlushRaf = 0;
+    const PACKET_FLUSH_LIMIT = 1200;
+
+    function syncLiveCounters(snapshot = {}, { reset = false } = {}) {
+      const c2s = Math.max(0, Number(snapshot.c2s_count) || 0);
+      const s2c = Math.max(0, Number(snapshot.s2c_count) || 0);
+      const inject = Math.max(0, Number(snapshot.c2s_seq_offset) || 0);
+      if (reset) {
+        liveCounters.c2s = c2s;
+        liveCounters.s2c = s2c;
+        liveCounters.inject = inject;
+        return;
+      }
+      liveCounters.c2s = Math.max(liveCounters.c2s, c2s);
+      liveCounters.s2c = Math.max(liveCounters.s2c, s2c);
+      liveCounters.inject = Math.max(liveCounters.inject, inject);
+    }
+
+    function accountLivePacket(ev) {
+      if (!ev || ev.type !== 'packet') return;
+      const evTs = Number(ev.ts) || 0;
+      if (liveCounterStartTs && evTs && evTs <= liveCounterStartTs) return;
+      if (ev.direction === 'c2s') liveCounters.c2s += 1;
+      else if (ev.direction === 's2c') liveCounters.s2c += 1;
+    }
+
+    function schedulePacketFlush() {
+      if (packetFlushRaf) return;
+      packetFlushRaf = window.requestAnimationFrame(flushPacketEvents);
+    }
+
+    function flushPacketEvents() {
+      if (packetFlushRaf) {
+        window.cancelAnimationFrame(packetFlushRaf);
+        packetFlushRaf = 0;
+      }
+      if (!pendingPackets.length) return;
+      const batch = pendingPackets.splice(0, PACKET_FLUSH_LIMIT);
+      const dropped = stream.pushBatch(batch);
+      dropVisibleEvents(dropped);
+      appendVisibleEvents(batch);
+      if (pendingPackets.length) schedulePacketFlush();
+    }
+
+    function enqueuePacketEvent(ev) {
+      accountLivePacket(ev);
+      if (paused.value) return;
+      pendingPackets.push(ev);
+      schedulePacketFlush();
+    }
+
     function applyPacketUpdate(ev) {
       const targetSeq = Number(ev.target_seq);
       if (!Number.isFinite(targetSeq)) return;
+      flushPacketEvents();
       const patch = { ...ev };
       delete patch.type;
       delete patch.seq;
@@ -755,7 +901,9 @@ const App = {
     }
 
     function requestDecodeNow(ev) {
-      if (!ev || ev.decode_status !== 'queued' || !ev.payload_hex) return;
+      if (!settings.observe?.decode_on_click) return;
+      const canDecode = ['queued', 'deferred', 'raw'].includes(ev?.decode_status) || (!ev?.decoded && ev?.payload_hex);
+      if (!ev || !canDecode || !ev.payload_hex) return;
       const opcode = ev.opcode_hex || ev.opcode;
       if (!opcode || !ev.seq) return;
       client.send('decode_now', {
@@ -846,6 +994,11 @@ const App = {
     watch(settings, () => applySettings(), { deep: true });
 
     function clearStream() {
+      pendingPackets.length = 0;
+      if (packetFlushRaf) {
+        window.cancelAnimationFrame(packetFlushRaf);
+        packetFlushRaf = 0;
+      }
       stream.clear();
       visibleStream.value = [];
       rebuildVisibleIndex();
@@ -856,20 +1009,20 @@ const App = {
       toasts.push({ kind: 'ok', title: 'WebSocket 已连接' });
     });
     client.on('close', () => { status.ws_connected = false; });
-    client.on('hello', (m) => { Object.assign(status, m.status || {}); });
-    client.on('packet', (ev) => {
-      if (paused.value) return;
-      const dropped = stream.push(ev);
-      dropVisibleEvents(dropped);
-      const displayEv = upsertVisibleEvent(ev);
-      maybeCaptureInjectReply(displayEv);
+    client.on('hello', (m) => {
+      Object.assign(status, m.status || {});
+      liveCounterStartTs = Number(m.ts) || (Date.now() / 1000);
+      syncLiveCounters(m.status || {}, { reset: true });
     });
+    client.on('packet', enqueuePacketEvent);
     client.on('packet_update', applyPacketUpdate);
     client.on('stream_reset', (ev) => {
       clearStream();
       trafficWindow.value = [];
       lastInject.value = null;
       injectReply.value = null;
+      liveCounterStartTs = Number(ev.ts) || (Date.now() / 1000);
+      syncLiveCounters({}, { reset: true });
       toasts.push({
         kind: 'warn',
         title: '检测到新 session_key，已清空旧数据',
@@ -877,7 +1030,10 @@ const App = {
       });
     });
     client.on('session', (ev) => {
-      if (ev.snapshot) Object.assign(status, ev.snapshot);
+      if (ev.snapshot) {
+        Object.assign(status, ev.snapshot);
+        syncLiveCounters(ev.snapshot, { reset: ev.name === 'session_closed' });
+      }
       if (ev.name === 'session_key') {
         toasts.push({ kind: 'ok', title: '已捕获 session_key', body: ev.info?.key_hex });
       } else if (ev.name === 'upstream_connected') {
@@ -898,7 +1054,11 @@ const App = {
     async function pullStatus() {
       try {
         const r = await fetch('/api/status');
-        if (r.ok) Object.assign(status, await r.json());
+        if (r.ok) {
+          const data = await r.json();
+          Object.assign(status, data);
+          syncLiveCounters(data);
+        }
       } catch { }
     }
 
@@ -1367,11 +1527,12 @@ const App = {
       if (trafficTimer) clearInterval(trafficTimer);
       if (scrollTimer != null) clearTimeout(scrollTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      if (packetFlushRaf) cancelAnimationFrame(packetFlushRaf);
       themeMedia?.removeEventListener?.('change', applyTheme);
     });
 
     return {
-      status, perf, toasts, stream, opcodes, templates,
+      status, liveCounters, perf, toasts, stream, opcodes, templates,
       streamListRef, lastInject, injectReply,
       settings, showSettingsModal, settingsSaving, settingsError,
       showRfnPanel, rfnConsole,

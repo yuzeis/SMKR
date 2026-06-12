@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import json
 import os
 import sys
 import threading
@@ -39,6 +40,80 @@ LogHook = Callable[[str, str], None]  # (level, message)
 PACKET_HOOK: PacketHook | None = None
 SESSION_HOOK: SessionHook | None = None
 LOG_HOOK: LogHook | None = None
+
+
+@dataclass(frozen=True)
+class ProxyOptions:
+    s2c_passthrough_after_key: bool = False
+    observe_s2c: bool = True
+    allow_s2c_inject: bool = False
+    observe_c2s: bool = True
+    c2s_batch_packets: int = 64
+    c2s_batch_bytes: int = 262144
+    c2s_drain_interval_ms: int = 0
+    observe_queue_max: int = 2000
+
+
+_OPTIONS_LOCK = threading.Lock()
+PROXY_OPTIONS = ProxyOptions()
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _as_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        out = default
+    return max(min_value, min(max_value, out))
+
+
+def normalize_proxy_options(data: dict[str, Any] | None) -> dict[str, Any]:
+    src = data if isinstance(data, dict) else {}
+    defaults = ProxyOptions()
+    return {
+        "s2c_passthrough_after_key": _as_bool(
+            src.get("s2c_passthrough_after_key"), defaults.s2c_passthrough_after_key
+        ),
+        "observe_s2c": _as_bool(src.get("observe_s2c"), defaults.observe_s2c),
+        "allow_s2c_inject": _as_bool(src.get("allow_s2c_inject"), defaults.allow_s2c_inject),
+        "observe_c2s": _as_bool(src.get("observe_c2s"), defaults.observe_c2s),
+        "c2s_batch_packets": _as_int(
+            src.get("c2s_batch_packets"), defaults.c2s_batch_packets, min_value=1, max_value=1024
+        ),
+        "c2s_batch_bytes": _as_int(
+            src.get("c2s_batch_bytes"), defaults.c2s_batch_bytes, min_value=1024, max_value=8 * 1024 * 1024
+        ),
+        "c2s_drain_interval_ms": _as_int(
+            src.get("c2s_drain_interval_ms"), defaults.c2s_drain_interval_ms, min_value=0, max_value=1000
+        ),
+        "observe_queue_max": _as_int(
+            src.get("observe_queue_max"), defaults.observe_queue_max, min_value=0, max_value=100000
+        ),
+    }
+
+
+def install_options(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    global PROXY_OPTIONS
+    normalized = normalize_proxy_options(options)
+    with _OPTIONS_LOCK:
+        PROXY_OPTIONS = ProxyOptions(**normalized)
+    return normalized
+
+
+def get_options() -> ProxyOptions:
+    with _OPTIONS_LOCK:
+        return PROXY_OPTIONS
 
 
 @dataclass
@@ -136,7 +211,119 @@ class PerfStats:
         }
 
 
+class PerfDetailCollector:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._enabled = False
+        self._started_at = 0.0
+        self._max_seconds = 60.0
+        self._max_events = 20000
+        self._events: list[dict[str, Any]] = []
+        self._dropped = 0
+
+    def start(self, *, max_seconds: float = 60.0, max_events: int = 20000) -> dict[str, Any]:
+        max_seconds = max(1.0, min(3600.0, float(max_seconds or 60.0)))
+        max_events = max(100, min(1_000_000, int(max_events or 20000)))
+        with self._lock:
+            self._enabled = True
+            self._started_at = time.time()
+            self._max_seconds = max_seconds
+            self._max_events = max_events
+            self._events = []
+            self._dropped = 0
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            self._enabled = False
+        return self.status()
+
+    def clear(self) -> dict[str, Any]:
+        with self._lock:
+            self._events = []
+            self._dropped = 0
+        return self.status()
+
+    def record(
+        self,
+        *,
+        stage: str,
+        direction: str,
+        elapsed_ns: int,
+        byte_count: int = 0,
+        **fields: Any,
+    ) -> None:
+        if not self._enabled:
+            return
+        now = time.time()
+        with self._lock:
+            if not self._enabled:
+                return
+            if now - self._started_at >= self._max_seconds:
+                self._enabled = False
+                return
+            if len(self._events) >= self._max_events:
+                self._enabled = False
+                self._dropped += 1
+                return
+            ev = {
+                "ts": now,
+                "stage": str(stage),
+                "direction": str(direction),
+                "elapsed_ms": max(0, int(elapsed_ns)) / 1_000_000,
+                "bytes": max(0, int(byte_count)),
+            }
+            for key, value in fields.items():
+                if value is not None:
+                    ev[str(key)] = value
+            self._events.append(ev)
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            elapsed = time.time() - self._started_at if self._started_at else 0.0
+            return {
+                "enabled": self._enabled,
+                "started_at": self._started_at,
+                "elapsed_sec": elapsed,
+                "max_seconds": self._max_seconds,
+                "max_events": self._max_events,
+                "event_count": len(self._events),
+                "dropped": self._dropped,
+            }
+
+    def events(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if limit is None or limit <= 0:
+                return [dict(ev) for ev in self._events]
+            return [dict(ev) for ev in self._events[-limit:]]
+
+    def snapshot(self) -> dict[str, Any]:
+        events = self.events()
+        grouped: dict[str, dict[str, Any]] = {}
+        for ev in events:
+            key = f"{ev.get('direction','')}.{ev.get('stage','')}"
+            item = grouped.setdefault(key, {
+                "direction": ev.get("direction"),
+                "stage": ev.get("stage"),
+                "count": 0,
+                "bytes": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+            })
+            elapsed = float(ev.get("elapsed_ms") or 0.0)
+            item["count"] += 1
+            item["bytes"] += int(ev.get("bytes") or 0)
+            item["total_ms"] += elapsed
+            item["max_ms"] = max(float(item["max_ms"]), elapsed)
+        for item in grouped.values():
+            count = max(1, int(item["count"]))
+            item["avg_ms"] = float(item["total_ms"]) / count
+            item.pop("total_ms", None)
+        return {"status": self.status(), "groups": list(grouped.values())}
+
+
 PERF_STATS = PerfStats()
+PERF_DETAIL = PerfDetailCollector()
 
 
 def _log(level: str, msg: str) -> None:
@@ -176,6 +363,24 @@ class SessionState:
     started_at: float = field(default_factory=time.time)
     upstream_ip: str = ""
     upstream_port: int = 0
+    emitted_session_key_hex: str = ""
+
+
+@dataclass
+class OutboundItem:
+    tag: str
+    wire: bytes
+    source_ns: int
+    gcp_seq: int | None = None
+    command: int | None = None
+    command_name: str = ""
+
+
+@dataclass
+class ObserveItem:
+    pkt: bytes
+    direction: str
+    emit_event: bool
 
 
 ACTIVE_SESSION: "MitmSession | None" = None
@@ -199,9 +404,15 @@ class MitmSession:
         self.state = SessionState(upstream_ip=upstream_ip, upstream_port=upstream_port)
         self.upstream_r = None
         self.upstream_w = None
-        self._outbound_queue: asyncio.Queue[tuple[str, bytes, int]] = asyncio.Queue(
+        self._outbound_queue: asyncio.Queue[OutboundItem] = asyncio.Queue(
             maxsize=OUTBOUND_QUEUE_MAXSIZE
         )
+        observe_max = get_options().observe_queue_max
+        self._observe_queue: asyncio.Queue[ObserveItem] | None = (
+            asyncio.Queue(maxsize=observe_max) if observe_max > 0 else None
+        )
+        self._observe_dropped = 0
+        self._observe_task: asyncio.Task | None = None
         self._closed = False
 
     @property
@@ -252,6 +463,8 @@ class MitmSession:
             asyncio.create_task(self._pump_s2c(), name="s2c"),
             asyncio.create_task(self._pump_upstream_send(), name="upstream_send"),
         ]
+        if self._observe_queue is not None:
+            self._observe_task = asyncio.create_task(self._observe_worker(), name="observe")
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
@@ -263,6 +476,11 @@ class MitmSession:
                 if exc:
                     _log("error", f"task {t.get_name()} exc: {exc!r}")
         finally:
+            if self._observe_task is not None:
+                self._observe_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await self._observe_task
+                self._observe_task = None
             self.close()
             for writer in (self.client_w, self.upstream_w):
                 if writer is None:
@@ -277,6 +495,93 @@ class MitmSession:
                 "active_sessions": len(ACTIVE_SESSIONS),
             })
 
+    def _make_outbound_item(self, tag: str, wire: bytes, source_ns: int) -> OutboundItem:
+        gcp_seq = None
+        command = None
+        command_name = ""
+        try:
+            head = GcpHead.unpack(wire)
+            gcp_seq = head.sequence
+            command = head.command
+            command_name = _classify_command(head.command)
+        except Exception:
+            pass
+        return OutboundItem(
+            tag=tag,
+            wire=wire,
+            source_ns=source_ns,
+            gcp_seq=gcp_seq,
+            command=command,
+            command_name=command_name,
+        )
+
+    def _record_detail(
+        self,
+        stage: str,
+        direction: str,
+        elapsed_ns: int,
+        byte_count: int = 0,
+        item: OutboundItem | None = None,
+        **fields: Any,
+    ) -> None:
+        if item is not None:
+            fields.setdefault("session_token", self.session_token)
+            fields.setdefault("gcp_seq", item.gcp_seq)
+            fields.setdefault("command", item.command)
+            fields.setdefault("command_name", item.command_name)
+            fields.setdefault("upstream", f"{self.upstream_ip}:{self.upstream_port}")
+        PERF_DETAIL.record(
+            stage=stage,
+            direction=direction,
+            elapsed_ns=elapsed_ns,
+            byte_count=byte_count,
+            **fields,
+        )
+
+    def _queue_observe(self, pkt: bytes, direction: str, *, emit_event: bool = True) -> None:
+        queue = self._observe_queue
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(ObserveItem(pkt=pkt, direction=direction, emit_event=emit_event))
+        except asyncio.QueueFull:
+            self._observe_dropped += 1
+            PERF_STATS.record("observe_drop", 0, len(pkt))
+            PERF_DETAIL.record(
+                stage="observe_drop",
+                direction=direction,
+                elapsed_ns=0,
+                byte_count=len(pkt),
+                session_token=self.session_token,
+                dropped=self._observe_dropped,
+            )
+
+    async def _observe_worker(self) -> None:
+        assert self._observe_queue is not None
+        while True:
+            item = await self._observe_queue.get()
+            start_ns = time.perf_counter_ns()
+            try:
+                await asyncio.to_thread(
+                    self._observe,
+                    item.pkt,
+                    item.direction,
+                    emit_event=item.emit_event,
+                )
+            except Exception as exc:
+                _log("warn", f"observe worker failed: {exc!r}")
+            finally:
+                elapsed_ns = time.perf_counter_ns() - start_ns
+                PERF_STATS.record("observe_worker", elapsed_ns, len(item.pkt))
+                PERF_DETAIL.record(
+                    stage="observe_worker",
+                    direction=item.direction,
+                    elapsed_ns=elapsed_ns,
+                    byte_count=len(item.pkt),
+                    session_token=self.session_token,
+                    queue_depth=self._observe_queue.qsize(),
+                )
+
     async def _pump_c2s(self):
         buf = bytearray()
         while True:
@@ -288,6 +593,7 @@ class MitmSession:
             buf.extend(data)
             observed: list[bytes] = []
             while True:
+                parse_start = time.perf_counter_ns()
                 try:
                     pkt = _try_pop_packet(buf)
                 except Exception as exc:
@@ -295,15 +601,30 @@ class MitmSession:
                     return
                 if pkt is None:
                     break
+                PERF_DETAIL.record(
+                    stage="c2s_parse",
+                    direction="c2s",
+                    elapsed_ns=time.perf_counter_ns() - parse_start,
+                    byte_count=len(pkt),
+                    session_token=self.session_token,
+                )
+                rewrite_start = time.perf_counter_ns()
                 pkt_out = self._rewrite_c2s_seq(pkt)
+                PERF_DETAIL.record(
+                    stage="c2s_rewrite",
+                    direction="c2s",
+                    elapsed_ns=time.perf_counter_ns() - rewrite_start,
+                    byte_count=len(pkt_out),
+                    session_token=self.session_token,
+                )
                 self._note_c2s_sequence(pkt)
-                await self._outbound_queue.put(("C2S>", pkt_out, read_ns))
+                await self._outbound_queue.put(self._make_outbound_item("C2S>", pkt_out, read_ns))
                 PERF_STATS.record_queue_depth(self._outbound_queue.qsize())
                 observed.append(pkt)
             if observed:
-                await asyncio.sleep(0)
+                emit_c2s = get_options().observe_c2s
                 for pkt in observed:
-                    self._observe(pkt, direction="c2s")
+                    self._queue_observe(pkt, "c2s", emit_event=emit_c2s)
 
     def _rewrite_c2s_seq(self, pkt: bytes) -> bytes:
         """转发前同步改写 C2S 的 wire seq 和密文里的 counter1."""
@@ -343,10 +664,38 @@ class MitmSession:
                 _log("info", "S2C upstream closed")
                 return
             read_ns = time.perf_counter_ns()
+            opts = get_options()
+            if self.state.cipher is not None and opts.s2c_passthrough_after_key:
+                write_start = time.perf_counter_ns()
+                self.client_w.write(data)
+                write_end = time.perf_counter_ns()
+                PERF_STATS.record("s2c_passthrough_read_write", write_end - read_ns, len(data))
+                PERF_DETAIL.record(
+                    stage="s2c_passthrough_write",
+                    direction="s2c",
+                    elapsed_ns=write_end - write_start,
+                    byte_count=len(data),
+                    session_token=self.session_token,
+                    upstream=f"{self.upstream_ip}:{self.upstream_port}",
+                )
+                drain_start = time.perf_counter_ns()
+                await self.client_w.drain()
+                drain_end = time.perf_counter_ns()
+                PERF_STATS.record("s2c_passthrough_drain", drain_end - drain_start, len(data))
+                PERF_DETAIL.record(
+                    stage="s2c_passthrough_total",
+                    direction="s2c",
+                    elapsed_ns=drain_end - read_ns,
+                    byte_count=len(data),
+                    session_token=self.session_token,
+                    upstream=f"{self.upstream_ip}:{self.upstream_port}",
+                )
+                continue
             buf.extend(data)
             observed: list[bytes] = []
             write_bytes = 0
             while True:
+                parse_start = time.perf_counter_ns()
                 try:
                     pkt = _try_pop_packet(buf)
                 except Exception as exc:
@@ -354,20 +703,51 @@ class MitmSession:
                     return
                 if pkt is None:
                     break
-                self._prime_s2c_state(pkt)
+                PERF_DETAIL.record(
+                    stage="s2c_parse",
+                    direction="s2c",
+                    elapsed_ns=time.perf_counter_ns() - parse_start,
+                    byte_count=len(pkt),
+                    session_token=self.session_token,
+                )
+                self._prime_s2c_state(pkt, emit_event=not opts.observe_s2c)
                 write_ns = time.perf_counter_ns()
                 PERF_STATS.record("s2c_read_write", write_ns - read_ns, len(pkt))
                 self.client_w.write(pkt)
                 write_bytes += len(pkt)
-                observed.append(pkt)
+                if opts.observe_s2c:
+                    observed.append(pkt)
+                if self.state.cipher is not None and opts.s2c_passthrough_after_key:
+                    if buf:
+                        remaining = bytes(buf)
+                        self.client_w.write(remaining)
+                        write_bytes += len(remaining)
+                        PERF_DETAIL.record(
+                            stage="s2c_passthrough_remainder",
+                            direction="s2c",
+                            elapsed_ns=0,
+                            byte_count=len(remaining),
+                            session_token=self.session_token,
+                        )
+                        buf.clear()
+                    break
             if write_bytes:
                 drain_start = time.perf_counter_ns()
                 await self.client_w.drain()
-                PERF_STATS.record("s2c_write_drain", time.perf_counter_ns() - drain_start, write_bytes)
+                drain_elapsed = time.perf_counter_ns() - drain_start
+                PERF_STATS.record("s2c_write_drain", drain_elapsed, write_bytes)
+                PERF_DETAIL.record(
+                    stage="s2c_drain",
+                    direction="s2c",
+                    elapsed_ns=drain_elapsed,
+                    byte_count=write_bytes,
+                    session_token=self.session_token,
+                    upstream=f"{self.upstream_ip}:{self.upstream_port}",
+                )
             for pkt in observed:
-                self._observe(pkt, direction="s2c")
+                self._queue_observe(pkt, "s2c", emit_event=True)
 
-    async def _pump_upstream_send(self):
+    async def _pump_upstream_send_legacy(self):
         while True:
             tag, wire, source_ns = await self._outbound_queue.get()
             PERF_STATS.record_queue_depth(self._outbound_queue.qsize())
@@ -389,7 +769,7 @@ class MitmSession:
             metric = "c2s_write_drain" if tag == "C2S>" else "inject_write_drain"
             PERF_STATS.record(metric, time.perf_counter_ns() - drain_start, len(wire))
 
-    def _prime_s2c_state(self, pkt: bytes) -> None:
+    def _prime_s2c_state_legacy(self, pkt: bytes) -> None:
         try:
             head = GcpHead.unpack(pkt)
         except Exception:
@@ -399,6 +779,116 @@ class MitmSession:
         key = pkt[0x17 : 0x17 + 16]
         self.state.cipher = GcpCipher(key)
         self.state.session_key_hex = key.hex()
+
+    async def _pump_upstream_send(self):
+        while True:
+            first = await self._outbound_queue.get()
+            opts = get_options()
+            max_packets = max(1, int(opts.c2s_batch_packets))
+            max_bytes = max(1, int(opts.c2s_batch_bytes))
+            batch = [first]
+            batch_bytes = len(first.wire)
+
+            if opts.c2s_drain_interval_ms > 0 and batch_bytes < max_bytes and max_packets > 1:
+                try:
+                    item = await asyncio.wait_for(
+                        self._outbound_queue.get(),
+                        timeout=opts.c2s_drain_interval_ms / 1000.0,
+                    )
+                    batch.append(item)
+                    batch_bytes += len(item.wire)
+                except asyncio.TimeoutError:
+                    pass
+
+            while len(batch) < max_packets and batch_bytes < max_bytes:
+                try:
+                    item = self._outbound_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                batch.append(item)
+                batch_bytes += len(item.wire)
+
+            PERF_STATS.record_queue_depth(self._outbound_queue.qsize())
+            metric_bytes: dict[str, int] = {}
+            for item in batch:
+                if item.tag != "C2S>":
+                    _log("debug", f"{item.tag} to upstream {len(item.wire)} bytes")
+                write_start = time.perf_counter_ns()
+                if item.tag == "C2S>":
+                    PERF_STATS.record("c2s_read_write", write_start - item.source_ns, len(item.wire))
+                    metric_name = "c2s_write_drain"
+                else:
+                    PERF_STATS.record("inject_queue_delay", write_start - item.source_ns, len(item.wire))
+                    metric_name = "inject_write_drain"
+                metric_bytes[metric_name] = metric_bytes.get(metric_name, 0) + len(item.wire)
+                self._record_detail(
+                    "queue_wait",
+                    "c2s",
+                    write_start - item.source_ns,
+                    len(item.wire),
+                    item=item,
+                    batch_len=len(batch),
+                    queue_depth=self._outbound_queue.qsize(),
+                )
+                self.upstream_w.write(item.wire)
+                self._record_detail(
+                    "write_call",
+                    "c2s",
+                    time.perf_counter_ns() - write_start,
+                    len(item.wire),
+                    item=item,
+                    batch_len=len(batch),
+                )
+
+            drain_start = time.perf_counter_ns()
+            try:
+                await asyncio.wait_for(self.upstream_w.drain(), timeout=UPSTREAM_DRAIN_TIMEOUT)
+            except asyncio.TimeoutError:
+                _log("error", f"upstream drain timeout after {UPSTREAM_DRAIN_TIMEOUT:.1f}s")
+                self.close()
+                return
+            drain_end = time.perf_counter_ns()
+            drain_elapsed = drain_end - drain_start
+            for metric_name, byte_count in metric_bytes.items():
+                PERF_STATS.record(metric_name, drain_elapsed, byte_count)
+            for item in batch:
+                self._record_detail(
+                    "drain",
+                    "c2s",
+                    drain_elapsed,
+                    len(item.wire),
+                    item=item,
+                    batch_len=len(batch),
+                )
+                self._record_detail(
+                    "total_read_to_drain",
+                    "c2s",
+                    drain_end - item.source_ns,
+                    len(item.wire),
+                    item=item,
+                    batch_len=len(batch),
+                )
+                self._outbound_queue.task_done()
+
+    def _prime_s2c_state(self, pkt: bytes, *, emit_event: bool = False) -> bool:
+        try:
+            head = GcpHead.unpack(pkt)
+        except Exception:
+            return False
+        if head.command != CMD_ACK:
+            return False
+        key = pkt[0x17 : 0x17 + 16]
+        key_hex = key.hex()
+        self.state.cipher = GcpCipher(key)
+        self.state.session_key_hex = key_hex
+        if emit_event and self.state.emitted_session_key_hex != key_hex:
+            self.state.emitted_session_key_hex = key_hex
+            _log("info", f"S2C *** ACK session_key = {key_hex} ***")
+            _emit_session_event("session_key", {
+                "key_hex": key_hex,
+                "key_ascii": _safe_ascii(key),
+            })
+        return True
 
     def _note_c2s_sequence(self, pkt: bytes) -> None:
         try:
@@ -411,7 +901,7 @@ class MitmSession:
         if ACTIVE_SESSION is not self:
             ACTIVE_SESSION = self
 
-    def _observe(self, pkt: bytes, direction: str):
+    def _observe_legacy(self, pkt: bytes, direction: str):
         try:
             head = GcpHead.unpack(pkt)
         except Exception as exc:
@@ -474,6 +964,66 @@ class MitmSession:
         )
 
 
+    def _observe(self, pkt: bytes, direction: str, *, emit_event: bool = True):
+        try:
+            head = GcpHead.unpack(pkt)
+        except Exception as exc:
+            _log("warn", f"{direction} head parse failed: {exc}")
+            return
+
+        if direction == "c2s":
+            self._note_c2s_sequence(pkt)
+
+        if direction == "s2c" and head.command == CMD_ACK:
+            self._prime_s2c_state(pkt, emit_event=emit_event)
+            if emit_event:
+                _emit_packet_event(
+                    ts=time.time(), direction="s2c", head=head, internal=None,
+                    payload=b"", opcode=None, raw_pkt=pkt, kind="ack",
+                )
+            return
+
+        if head.command != CMD_DATA or self.state.cipher is None:
+            if emit_event:
+                kind = _classify_command(head.command)
+                _emit_packet_event(
+                    ts=time.time(), direction=direction, head=head, internal=None,
+                    payload=b"", opcode=None, raw_pkt=pkt, kind=kind,
+                )
+            return
+
+        body = pkt[head.head_length : head.head_length + head.body_length]
+        try:
+            plain_full = self._decrypt_body_timed(body)
+            plain_no_trail, _trailer = self.state.cipher.split_trailer(plain_full)
+            internal, payload = split_plaintext(plain_no_trail)
+        except Exception as exc:
+            _log("warn", f"{direction} DATA decrypt failed gcp_seq={head.sequence}: {exc}")
+            if emit_event:
+                _emit_packet_event(
+                    ts=time.time(), direction=direction, head=head, internal=None,
+                    payload=b"", opcode=None, raw_pkt=pkt, kind="data_decrypt_failed",
+                    error=str(exc),
+                )
+            return
+
+        opcode = internal.sub_id if direction == "c2s" else (internal.session_id & 0xFFFF)
+
+        if direction == "c2s":
+            self.state.c2s_count += 1
+            if _is_inject_baseline_candidate(internal, self.state.last_internal):
+                self.state.last_internal = internal
+            self.state.last_c2_by_opcode[opcode] = internal.counter2
+        else:
+            self.state.s2c_count += 1
+
+        if emit_event:
+            _emit_packet_event(
+                ts=time.time(), direction=direction, head=head, internal=internal,
+                payload=payload, opcode=opcode, raw_pkt=pkt, kind="data",
+            )
+
+
     def inject(self, *, opcode: int, payload: bytes, fallback_opcode: int | None = None) -> dict:
         """把任意 opcode + payload 注入到上游。返回注入元信息。
 
@@ -500,7 +1050,9 @@ class MitmSession:
         PERF_STATS.record("inject_build", time.perf_counter_ns() - build_start, len(wire))
         c2_wire = compose_counter2(c2_use, payload)
         try:
-            self._outbound_queue.put_nowait(("INJECT>", wire, time.perf_counter_ns()))
+            self._outbound_queue.put_nowait(
+                self._make_outbound_item("INJECT>", wire, time.perf_counter_ns())
+            )
         except asyncio.QueueFull as exc:
             raise InjectError("outbound queue is full") from exc
         self.state.c2s_seq_offset += 1
@@ -665,6 +1217,34 @@ def get_active_session() -> "MitmSession | None":
 
 def perf_snapshot() -> dict[str, Any]:
     return PERF_STATS.snapshot()
+
+
+def perf_detail_status() -> dict[str, Any]:
+    return PERF_DETAIL.status()
+
+
+def perf_detail_start(*, max_seconds: float = 60.0, max_events: int = 20000) -> dict[str, Any]:
+    return PERF_DETAIL.start(max_seconds=max_seconds, max_events=max_events)
+
+
+def perf_detail_stop() -> dict[str, Any]:
+    return PERF_DETAIL.stop()
+
+
+def perf_detail_clear() -> dict[str, Any]:
+    return PERF_DETAIL.clear()
+
+
+def perf_detail_events(*, limit: int | None = None) -> list[dict[str, Any]]:
+    return PERF_DETAIL.events(limit=limit)
+
+
+def perf_detail_snapshot() -> dict[str, Any]:
+    return PERF_DETAIL.snapshot()
+
+
+def perf_detail_export_jsonl() -> str:
+    return "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in PERF_DETAIL.events())
 
 
 

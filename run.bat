@@ -86,7 +86,7 @@ if defined SKIP_DIVERT (
 
 echo.
 echo ========================================================
-echo   RocoMITMServer Ver2.1 Verzweifelt ^(RKMS^) - Web Mode
+echo   RocoMITMServer Ver2.3 Untergangsgeweiht ^(RKMS^) - Web Mode
 echo ========================================================
 echo.
 echo [info] Web UI: http://127.0.0.1:18196/

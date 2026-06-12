@@ -4,7 +4,7 @@
     <div class="topbar-brand">
       <div class="logo">R</div>
       <div class="brand-copy">
-        RKMS<span class="ver"> · 2.1 Verzweifelt</span><span class="author">花吹雪又一年</span>
+        RKMS<span class="ver"> · 2.3 Untergangsgeweiht</span><span class="author">花吹雪又一年</span>
       </div>
     </div>
 
@@ -106,7 +106,7 @@
             <span class="pkt-tag heartbeat" v-if="ev.wire?.command === 0x9001">heartbeat</span>
             <span class="pkt-tag ack" v-if="ev.kind === 'ack'">ACK</span>
             <span class="pkt-tag inject" v-if="ev.kind === 'inject'">inject</span>
-            <span class="pkt-tag heartbeat" v-if="ev.decode_status === 'queued'">decode</span>
+            <span class="pkt-tag heartbeat" v-if="ev.decode_status === 'queued' || ev.decode_status === 'deferred'">decode</span>
             <span class="pkt-tag err" v-if="ev.kind === 'data_decrypt_failed'">decrypt-err</span>
             <span class="pkt-meta">
               seq=<b>{{ ev.wire?.sequence }}</b><span v-if="ev.payload_len"> · {{ ev.payload_len }}B</span>
@@ -345,9 +345,9 @@
   </main>
 
   <footer class="statusbar">
-    <span class="stat c2s"><span>C2S</span><span class="v">{{ status.c2s_count }}</span></span>
-    <span class="stat s2c"><span>S2C</span><span class="v">{{ status.s2c_count }}</span></span>
-    <span class="stat inj"><span>Inject</span><span class="v">{{ status.c2s_seq_offset }}</span></span>
+    <span class="stat c2s"><span>C2S</span><span class="v">{{ liveCounters.c2s }}</span></span>
+    <span class="stat s2c"><span>S2C</span><span class="v">{{ liveCounters.s2c }}</span></span>
+    <span class="stat inj"><span>Inject</span><span class="v">{{ liveCounters.inject }}</span></span>
 
     <div class="spark" :title="'最近 60s C2S/S2C 包计数'">
       <svg viewBox="0 0 240 24" preserveAspectRatio="none">
@@ -639,6 +639,77 @@
             <label class="check-row">
               <input type="checkbox" v-model="settings.services.mcp.allow_rfn_import" />
               <span><b>允许 MCP 临时导入 RFN</b><small>关闭时拒绝 rfn_import_run 工具。</small></span>
+            </label>
+          </section>
+        </div>
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>Proxy Hot Path</h3>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.proxy.s2c_passthrough_after_key" />
+              <span><b>S2C passthrough after session key</b><small>Default off for release visibility. Enable only for lowest-latency forwarding.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.proxy.observe_s2c" />
+              <span><b>Observe S2C packets</b><small>Default on. Keeps S2C visible for inject response tracking.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.proxy.allow_s2c_inject" />
+              <span><b>Allow S2C inject requests</b><small>Default off. Current server still rejects S2C inject as not implemented.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.proxy.observe_c2s" />
+              <span><b>Publish C2S packet events</b><small>Disable to keep baseline updates but reduce Web event traffic.</small></span>
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>C2S Queue</h3>
+            <div class="setting-row two">
+              <label><span>Batch packets</span><input type="number" min="1" max="1024" v-model.number="settings.proxy.c2s_batch_packets" /></label>
+              <label><span>Batch bytes</span><input type="number" min="1024" max="8388608" step="1024" v-model.number="settings.proxy.c2s_batch_bytes" /></label>
+            </div>
+            <div class="setting-row two">
+              <label><span>Drain wait ms</span><input type="number" min="0" max="1000" v-model.number="settings.proxy.c2s_drain_interval_ms" /></label>
+              <label><span>Observe queue</span><input type="number" min="0" max="100000" step="100" v-model.number="settings.proxy.observe_queue_max" /></label>
+            </div>
+          </section>
+        </div>
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>Performance Diagnostics</h3>
+            <div class="setting-row two">
+              <label><span>Max seconds</span><input type="number" min="1" max="3600" v-model.number="settings.perf.detail_max_seconds" /></label>
+              <label><span>Max events</span><input type="number" min="100" max="1000000" step="100" v-model.number="settings.perf.detail_max_events" /></label>
+            </div>
+            <label class="setting-row">
+              <span>Snapshot interval ms</span>
+              <input type="number" min="250" max="10000" step="250" v-model.number="settings.perf.snapshot_interval_ms" />
+            </label>
+            <a class="btn" href="/perf" target="_blank" rel="noreferrer">Open performance page</a>
+          </section>
+        </div>
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>Observe / Decode</h3>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.observe.auto_decode_packets" />
+              <span><b>Auto decode packet stream</b><small>Default off. Decode only when a packet is opened unless this is enabled.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.observe.decode_on_click" />
+              <span><b>Decode on packet open</b><small>Default on. Keeps C2S/S2C visible while avoiding background schema decode.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.observe.rfn_active_watch_only" />
+              <span><b>RFN active watch only</b><small>Default on. RFN only receives packets matching pending query or packet bindings.</small></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="settings.observe.rfn_passive_packet_seen" />
+              <span><b>RFN passive packet_seen</b><small>Default off. Re-enables legacy all-packet RFN observe behavior.</small></span>
             </label>
           </section>
         </div>

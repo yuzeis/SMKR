@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roco-mitm-server"
-version = "2.1.0"
-description = "RocoMITMServer Ver2.1 Verzweifelt with Web UI, RFN runtime, MCP tools, and packed opcode schemas."
+version = "2.3.0"
+description = "RocoMITMServer Ver2.3 Untergangsgeweiht with Web UI, RFN runtime, MCP tools, and packed opcode schemas."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

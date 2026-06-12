@@ -1,0 +1,11 @@
+# Update.log
+
+## RocoMITMServer Ver2.3 Untergangsgeweiht - 2026-06-12
+
+- 统一项目版本号为 `2.3.0`，版本代号为 `Untergangsgeweiht`，Release 标签为 `RocoMITMServer_Ver2.3_Untergangsgeweiht`。
+- 重写 `README.md` 和 `NOTICE`，修正文档编码显示问题，并补充快速启动、Web 入口、性能诊断页、许可证、用途声明和免责声明。
+- 新增代理性能配置与详细采样能力，包括 C2S 批量发送、观察队列上限、S2C 观察开关、S2C 注入保护开关和性能事件 JSONL 导出。
+- 新增 `/perf` 性能诊断页及 `/api/perf/*` 接口，用于查看轻量统计、详细采样状态、事件列表和导出结果。
+- 优化 Web 包流展示与设置同步逻辑，增加自动解码、点击解码、RFN active watch 过滤和 passive packet seen 配置项。
+- 增强 RFN live 包投递逻辑，避免无关包过量进入脚本运行时，并补充相关集成测试。
+- 补充代理性能选项和设置归一化测试，覆盖配置边界和默认值行为。
