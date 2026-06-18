@@ -1,7 +1,5 @@
 # RocoMITMServer Ver2.3 Untergangsgeweiht
 
-RocoMITMServer 是面向洛克王国流量的本地研究工具，提供 MITM 代理、Web 控制台、RFN 运行时、MCP 接口、协议结构观察和性能诊断能力。
-
 本项目仅用于安全研究、逆向学习、个人协议分析、教学示例和互操作性验证。使用者应自行确认操作符合适用法律法规、服务条款、用户协议、EULA 和第三方权利要求。
 
 ## 版本信息
